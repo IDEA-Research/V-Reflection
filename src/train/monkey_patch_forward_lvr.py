@@ -1047,8 +1047,8 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
             # Get last hidden states for <lvr> token positions, starting <lvr_start>
             seq_positions_start = seq_positions - 1  # shift left by 1 pos, now points to lvr_start
             
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'slot-attention' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
-                # MLP-mask, Slot-Attention, and Intrinsic-Similarity LVR heads need image embeddings - batch processing
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+                # MLP-mask and Intrinsic-Similarity LVR heads need image embeddings - batch processing
                 # Get model dtype to avoid unnecessary dtype conversions
                 model_dtype = _get_lvr_head_dtype(self.lvr_head)
                 
@@ -1060,7 +1060,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
                     image_embeds, total_tokens, batch_indices, target_dtype=model_dtype
                 )
                 
-                # Batch call LVR head (works for both attention-mask and slot-attention)
+                # Batch call LVR head (works for attention-mask and other batch-processing heads)
                 v_focal_batch = self.lvr_head(batched_hidden_states, batched_image_embeds, image_attention_mask)  # (L_total, hidden_size)
                 
                 # Batch replace hidden states (convert back to original dtype if needed)
@@ -1083,8 +1083,8 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
 
     '''apply lvr_head in _inference mode'''
     if lvr_mode_switch:
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'slot-attention' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
-            # MLP-mask, Slot-Attention, and Intrinsic-Similarity LVR heads in inference mode - batch processing
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+            # MLP-mask and Intrinsic-Similarity LVR heads in inference mode - batch processing
             if pixel_values is not None:
                 # Get image embeddings (already computed above)
                 # For inference, we need to map batch indices to image embeddings
@@ -1101,7 +1101,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
                         image_embeds, total_tokens, lvr_batch_indices
                     )
                     
-                    # Batch call LVR head (works for both attention-mask and slot-attention)
+                    # Batch call LVR head (works for attention-mask and other batch-processing heads)
                     v_focal_batch = self.lvr_head(batched_hidden_states, batched_image_embeds, image_attention_mask)  # (num_lvr_items, hidden_size)
                     
                     # Batch replace hidden states
@@ -1151,7 +1151,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
         # Get last hidden states for <lvr> token positions
         seq_positions_start = seq_positions - 1  # Now points to lvr_start
         
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
             # MLP-mask LVR loss: compute reconstruction loss between V_focal and grounding box image tokens
             # Use selected_lvr_embeds as ground truth (same as original LVR behavior)
             ''' We need to convert to fp32 to avoid overflow by mse'''
@@ -1409,7 +1409,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
             # Get last hidden states for <lvr> token positions, starting <lvr_start>
             seq_positions_start = seq_positions - 1  # shift left by 1 pos, now points to lvr_start
             
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
                 # MLP-mask LVR head needs image embeddings - batch processing
                 # Get model dtype to avoid unnecessary dtype conversions
                 model_dtype = _get_lvr_head_dtype(self.lvr_head)
@@ -1426,7 +1426,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
 
     '''apply lvr_head in _inference mode'''
     if lvr_mode_switch:
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
             # MLP-mask LVR head in inference mode - batch processing
             # For intrinsic-similarity/isg head type, image_embeds is required
             requires_image_embeds = (self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg')
@@ -1539,7 +1539,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
         # Get last hidden states for <lvr> token positions
         seq_positions_start = seq_positions - 1  # Now points to lvr_start
         
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
             # MLP-mask LVR loss: compute reconstruction loss between V_focal and grounding box image tokens
             # Use selected_lvr_embeds as ground truth (same as original LVR behavior)
             ''' We need to convert to fp32 to avoid overflow by mse'''
@@ -1787,7 +1787,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_modeSwitchLoss(
             # Get last hidden states for <lvr> token positions, starting <lvr_start>
             seq_positions_start = seq_positions - 1  # shift left by 1 pos, now points to lvr_start
             
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
                 # MLP-mask LVR head needs image embeddings - batch processing
                 if 'image_embeds' in locals() and 'total_tokens' in locals():
                     # Get model dtype to avoid unnecessary dtype conversions
@@ -1812,7 +1812,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_modeSwitchLoss(
 
     '''apply lvr_head in _inference mode'''
     if lvr_mode_switch:
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
             # MLP-mask LVR head in inference mode - batch processing
             if pixel_values is not None:
                 batch_size = outputs.last_hidden_state.shape[0]
@@ -2146,7 +2146,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
             # Get last hidden states for <lvr> token positions, starting <lvr_start>
             seq_positions_start = seq_positions - 1  # shift left by 1 pos, now points to lvr_start
             
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
                 # MLP-mask LVR head needs image embeddings - batch processing
                 if 'image_embeds' in locals() and 'total_tokens' in locals():
                     # Get model dtype to avoid unnecessary dtype conversions
@@ -2171,7 +2171,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
 
             '''In this mode, <|lvr_latent_end|> is also a latent token'''
             seq_positions_start_latentend = seq_positions_latentend - 1
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
                 # MLP-mask LVR head for latent_end tokens - batch processing
                 if len(batch_indices_latentend) > 0:
                     if 'image_embeds' in locals() and 'total_tokens' in locals():
@@ -2696,7 +2696,7 @@ def qwen2_5_mixed_modality_forward_lvr_rl(
     if self.config.lvr_head:
         '''apply lvr_head in _inference mode'''
         if lvr_mode_switch is not None:
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
                 # MLP-mask LVR head in inference mode - batch processing
                 if pixel_values is not None:
                     batch_size = outputs.last_hidden_state.shape[0]

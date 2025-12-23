@@ -14,14 +14,6 @@ class ModelArguments:
     lvr_head: bool = field(default=False)
     lvr_head_type: str = field(default="simple")
     mlp_ratio: float = field(default=1.0, metadata={"help": "MLP ratio for attention-based LVR head. Controls projection dimension: 1.0=full, 0.5=half, 0.25=quarter"})
-    # Slot Attention parameters
-    num_slots: int = field(default=8, metadata={"help": "Number of semantic slots for slot-attention LVR head"})
-    slot_dim: Optional[int] = field(default=None, metadata={"help": "Dimension of each slot. None means use hidden_size"})
-    top_k: int = field(default=2, metadata={"help": "Number of slots to interact with per step"})
-    slot_iters: int = field(default=3, metadata={"help": "Number of iterations for slot initialization"})
-    router_temp: float = field(default=1.0, metadata={"help": "Temperature parameter for Gumbel-Softmax router"})
-    slot_attention_num_heads: int = field(default=4, metadata={"help": "Number of attention heads for slot attention cross-attention"})
-    slot_feature_dim: Optional[int] = field(default=None, metadata={"help": "Feature dimension for slot initializer. None means use hidden_size"})
     # IVR (Implicit Visual Routing) parameters
     ivr_iterations: int = field(default=3, metadata={"help": "Number of routing iterations for IVR head"})
     ivr_chunk_size: Optional[int] = field(default=None, metadata={"help": "Chunk size for IVR head (None means auto-select based on sequence length)"})

@@ -44,7 +44,7 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
 MAX_STEPS=2100
 LR=1e-5
 LVR_HEAD=True
-LVR_HEAD_TYPE="attention-mask"  # Options: simple, glu, attention-mask, slot-attention, ivr, implicit-visual-routing, intrinsic-similarity, isg
+LVR_HEAD_TYPE="attention-mask"  # Options: simple, glu, attention-mask, ivr, intrinsic-similarity, isg
 
 # IVR (Implicit Visual Routing) 参数
 IVR_ITERATIONS="${IVR_ITERATIONS:-3}"  # 路由迭代次数，默认3

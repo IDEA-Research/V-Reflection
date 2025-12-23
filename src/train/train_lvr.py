@@ -187,20 +187,8 @@ def train():
     config.mlp_ratio = getattr(model_args, 'mlp_ratio', 1.0)
     rank0_print(f"[INFO] Config mlp_ratio set to: {config.mlp_ratio}")
     
-    # Set slot-attention parameters if using slot-attention type
-    if model_args.lvr_head_type == 'slot-attention':
-        config.num_slots = getattr(model_args, 'num_slots', 8)
-        config.slot_dim = getattr(model_args, 'slot_dim', None)
-        config.top_k = getattr(model_args, 'top_k', 2)
-        config.slot_iters = getattr(model_args, 'slot_iters', 3)
-        config.router_temp = getattr(model_args, 'router_temp', 1.0)
-        config.slot_attention_num_heads = getattr(model_args, 'slot_attention_num_heads', 4)
-        config.slot_feature_dim = getattr(model_args, 'slot_feature_dim', None)
-        rank0_print(f"[INFO] Slot Attention config: num_slots={config.num_slots}, top_k={config.top_k}, "
-                   f"slot_iters={config.slot_iters}, router_temp={config.router_temp}")
-    
     # Set IVR parameters if using IVR type
-    if model_args.lvr_head_type == 'ivr' or model_args.lvr_head_type == 'implicit-visual-routing':
+    if model_args.lvr_head_type == 'ivr':
         config.ivr_iterations = getattr(model_args, 'ivr_iterations', 3)
         config.ivr_chunk_size = getattr(model_args, 'ivr_chunk_size', None)
         config.ivr_use_output_norm = getattr(model_args, 'ivr_use_output_norm', True)

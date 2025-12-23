@@ -53,7 +53,7 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 
 
-from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadSlotAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity
+from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity
 
 class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
@@ -90,35 +90,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 mlp_ratio=mlp_ratio,   # Control projection dimension
                 use_flash_attention=use_flash_attention  # Enable Flash Attention if available
             )
-        elif lvr_head_type == 'slot-attention':
-            # Slot Attention-based Head: uses semantic slot sparse interaction
-            # Key parameters:
-            #   num_slots: number of semantic slots (default: 8)
-            #   slot_dim: dimension of each slot (default: hidden_size)
-            #   top_k: number of slots to interact with per step (default: 2)
-            #   slot_iters: iterations for slot initialization (default: 3)
-            num_slots = getattr(self.config, 'num_slots', 8)
-            slot_dim = getattr(self.config, 'slot_dim', None)  # None means use hidden_size
-            top_k = getattr(self.config, 'top_k', 2)
-            slot_iters = getattr(self.config, 'slot_iters', 3)
-            router_temp = getattr(self.config, 'router_temp', 1.0)
-            num_heads = getattr(self.config, 'slot_attention_num_heads', 4)
-            feature_dim = getattr(self.config, 'slot_feature_dim', None)  # None means use hidden_size
-            
-            print(f"Using Slot Attention-based LVR Head with num_slots={num_slots}, "
-                  f"slot_dim={slot_dim}, top_k={top_k}, slot_iters={slot_iters}, "
-                  f"router_temp={router_temp}, num_heads={num_heads}")
-            self.lvr_head = LVRHeadSlotAttention(
-                hidden_size=self.config.hidden_size,
-                num_slots=num_slots,
-                slot_dim=slot_dim,
-                slot_iters=slot_iters,
-                top_k=top_k,
-                router_temp=router_temp,
-                num_heads=num_heads,
-                feature_dim=feature_dim
-            )
-        elif lvr_head_type == 'ivr' or lvr_head_type == 'implicit-visual-routing':
+        elif lvr_head_type == 'ivr':
             # Implicit Visual Routing (IVR): Parameter-free routing based on capsule network
             # Key advantages:
             #   - Completely parameter-free (except optional output normalization)
@@ -187,7 +159,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         else:
             # Raise an error for an unknown variant to prevent silent failures
             raise ValueError(f"Unknown lvr_head_type: '{lvr_head_type}'. "
-                             "Supported variants are 'simple', 'glu', 'attention-mask', 'slot-attention', 'ivr', 'implicit-visual-routing', 'gated-focus', 'gfr', 'intrinsic-similarity', 'isg'.")
+                             "Supported variants are 'simple', 'glu', 'attention-mask', 'ivr', 'gated-focus', 'gfr', 'intrinsic-similarity', 'isg'.")
         self.config.lvr_head_type = lvr_head_type
         
     def _init_lvr_latent_end_emb(self):
