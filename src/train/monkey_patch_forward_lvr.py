@@ -342,10 +342,10 @@ def qwen2_5_mixed_modality_forward_lvr(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
@@ -900,10 +900,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
@@ -1047,8 +1047,8 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
             # Get last hidden states for <lvr> token positions, starting <lvr_start>
             seq_positions_start = seq_positions - 1  # shift left by 1 pos, now points to lvr_start
             
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'slot-attention' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
-                # MLP-mask and Slot-Attention LVR heads need image embeddings - batch processing
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'slot-attention' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+                # MLP-mask, Slot-Attention, and Intrinsic-Similarity LVR heads need image embeddings - batch processing
                 # Get model dtype to avoid unnecessary dtype conversions
                 model_dtype = _get_lvr_head_dtype(self.lvr_head)
                 
@@ -1083,8 +1083,8 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
 
     '''apply lvr_head in _inference mode'''
     if lvr_mode_switch:
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'slot-attention' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
-            # MLP-mask and Slot-Attention LVR heads in inference mode - batch processing
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'slot-attention' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+            # MLP-mask, Slot-Attention, and Intrinsic-Similarity LVR heads in inference mode - batch processing
             if pixel_values is not None:
                 # Get image embeddings (already computed above)
                 # For inference, we need to map batch indices to image embeddings
@@ -1261,10 +1261,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
@@ -1409,7 +1409,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
             # Get last hidden states for <lvr> token positions, starting <lvr_start>
             seq_positions_start = seq_positions - 1  # shift left by 1 pos, now points to lvr_start
             
-            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
                 # MLP-mask LVR head needs image embeddings - batch processing
                 # Get model dtype to avoid unnecessary dtype conversions
                 model_dtype = _get_lvr_head_dtype(self.lvr_head)
@@ -1426,34 +1426,88 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
 
     '''apply lvr_head in _inference mode'''
     if lvr_mode_switch:
-        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr'):
+        if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'attention-mask' or self.config.lvr_head_type == 'ivr' or self.config.lvr_head_type == 'implicit-visual-routing' or self.config.lvr_head_type == 'gated-focus' or self.config.lvr_head_type == 'gfr' or self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
             # MLP-mask LVR head in inference mode - batch processing
+            # For intrinsic-similarity/isg head type, image_embeds is required
+            requires_image_embeds = (self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg')
+            
             if pixel_values is not None:
                 batch_size = outputs.last_hidden_state.shape[0]
                 lvr_batch_indices = torch.nonzero(lvr_mode_switch, as_tuple=True)[0]
-                if len(lvr_batch_indices) > 0 and 'total_tokens' in locals() and 'image_embeds' in locals():
+                
+                # Check if image_embeds is available
+                # image_embeds is only created when pixel_values is not None (line 1279)
+                # So if pixel_values is None here, image_embeds doesn't exist
+                # We need to check if it exists in the current scope
+                local_vars = locals()
+                has_image_embeds = 'image_embeds' in local_vars and local_vars.get('image_embeds') is not None
+                
+                # Compute total_tokens from image_mask if not available
+                if 'total_tokens' not in locals() or total_tokens is None:
+                    if 'image_mask' in locals() and image_mask is not None:
+                        total_tokens = torch.sum(image_mask, dim=1)  # Compute from image_mask
+                        has_total_tokens = True
+                    else:
+                        has_total_tokens = False
+                else:
+                    has_total_tokens = True
+                
+                if len(lvr_batch_indices) > 0 and has_image_embeds and has_total_tokens:
                     # Get model dtype to avoid unnecessary dtype conversions
                     model_dtype = next(self.lvr_head.parameters()).dtype if len(list(self.lvr_head.parameters())) > 0 else torch.bfloat16
                     
                     batched_hidden_states = outputs.last_hidden_state[lvr_batch_indices, -1].to(model_dtype)  # (num_lvr_items, hidden_size)
-                    batched_image_embeds, image_attention_mask = _prepare_batched_image_embeds(
-                        image_embeds, total_tokens, lvr_batch_indices, target_dtype=model_dtype
-                    )
-                    v_focal_batch = self.lvr_head(batched_hidden_states, batched_image_embeds, image_attention_mask)  # (num_lvr_items, hidden_size)
-                    outputs.last_hidden_state[lvr_batch_indices, -1] = v_focal_batch.to(outputs.last_hidden_state.dtype)
+                    # Safely access image_embeds - it should exist if has_image_embeds is True
+                    # Get image_embeds from local scope safely
+                    local_vars_check = locals()
+                    if 'image_embeds' in local_vars_check and local_vars_check['image_embeds'] is not None:
+                        current_image_embeds = local_vars_check['image_embeds']
+                        batched_image_embeds, image_attention_mask = _prepare_batched_image_embeds(
+                            current_image_embeds, total_tokens, lvr_batch_indices, target_dtype=model_dtype
+                        )
+                    else:
+                        # image_embeds not available, fall through to fallback handling
+                        has_image_embeds = False
+                        batched_image_embeds = None
+                        image_attention_mask = None
                     
-                    # Free memory
-                    del batched_hidden_states, batched_image_embeds, image_attention_mask, v_focal_batch
+                    if batched_image_embeds is not None:
+                        v_focal_batch = self.lvr_head(batched_hidden_states, batched_image_embeds, image_attention_mask)  # (num_lvr_items, hidden_size)
+                        outputs.last_hidden_state[lvr_batch_indices, -1] = v_focal_batch.to(outputs.last_hidden_state.dtype)
+                        
+                        # Free memory
+                        del batched_hidden_states, batched_image_embeds, image_attention_mask, v_focal_batch
+                    else:
+                        # image_embeds not available, fall through to fallback handling below
+                        has_image_embeds = False
                 elif len(lvr_batch_indices) > 0:
-                    # Fallback: use original behavior if image info not available
-                    for b_idx in lvr_batch_indices:
-                        hidden_state = outputs.last_hidden_state[b_idx, -1]
-                        outputs.last_hidden_state[b_idx, -1] = self.lvr_head(hidden_state.unsqueeze(0)).squeeze(0)
+                    # Fallback: if image info not available
+                    if requires_image_embeds:
+                        # For intrinsic-similarity head, skip LVR processing if image_embeds not available
+                        # This can happen in inference when image info is not properly passed
+                        pass  # Skip LVR head processing - use original hidden states
+                    else:
+                        # For other head types, use original behavior
+                        for b_idx in lvr_batch_indices:
+                            hidden_state = outputs.last_hidden_state[b_idx, -1]
+                            outputs.last_hidden_state[b_idx, -1] = self.lvr_head(hidden_state.unsqueeze(0)).squeeze(0)
             else:
-                # No images available, use original behavior
-                outputs.last_hidden_state[lvr_mode_switch,:,:] = self.lvr_head(outputs.last_hidden_state[lvr_mode_switch,:,:])
+                # No images available (pixel_values is None)
+                if requires_image_embeds:
+                    # For intrinsic-similarity head, skip LVR processing when no images
+                    pass  # Skip LVR head processing - use original hidden states
+                else:
+                    # For other head types, use original behavior
+                    outputs.last_hidden_state[lvr_mode_switch,:,:] = self.lvr_head(outputs.last_hidden_state[lvr_mode_switch,:,:])
         else:
-            outputs.last_hidden_state[lvr_mode_switch,:,:] = self.lvr_head(outputs.last_hidden_state[lvr_mode_switch,:,:])
+            # Fallback for head types that don't require image_embeds (like 'simple', 'glu')
+            # But check if it's actually a head type that requires image_embeds
+            if hasattr(self.config, 'lvr_head_type') and (self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg'):
+                # Skip LVR processing for intrinsic-similarity when not in the main condition block
+                # This can happen if image_embeds is not available
+                pass
+            else:
+                outputs.last_hidden_state[lvr_mode_switch,:,:] = self.lvr_head(outputs.last_hidden_state[lvr_mode_switch,:,:])
 
     hidden_states = outputs[0]
     last_position_hidden_state = outputs.last_hidden_state[:,-1,:]
@@ -1594,10 +1648,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_modeSwitchLoss(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
@@ -1947,10 +2001,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
@@ -2287,10 +2341,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.
@@ -2537,10 +2591,10 @@ def qwen2_5_mixed_modality_forward_lvr_rl(
     # Pass dummy image and dummy grid to the visual model to avoid deepspeed error.
     if not lvr_mode_switch and (pixel_values is None and pixel_values_videos is None):
         # Create dummy pixel_values and grid_thw for avoiding deepspeed error.
-        dummy_pixel = torch.zeros(784, 1176).to(self.model.visual.device)
-        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.model.visual.device)
+        dummy_pixel = torch.zeros(784, 1176).to(self.visual.device)
+        dummy_grid = torch.tensor([[1, 28, 28]]).to(self.visual.device)
         
-        dummy_pixel = dummy_pixel.type(self.model.visual.dtype)
+        dummy_pixel = dummy_pixel.type(self.visual.dtype)
         image_embeds = self.visual(dummy_pixel, grid_thw=dummy_grid)
         # Operates as maksed_scatter for the image tokens
         # However the values are all zeros so it dosen't affect the embeddings.

@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:hgx:8 # A800
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/stage1_7b_ivr_b1_lvr0.1_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_attention-mask_b1_acc8_8GPU_lvr0.1_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
@@ -33,9 +33,8 @@ DATA_PACKING=True
 LST=4096 #4096
 MAX_INSTANCE_PER_BATCH=1
 MAX_PACKED_TOKENS=$((MAX_INSTANCE_PER_BATCH * LST))
-MAX_SEQ_LENGTH_FILTER="" # Filter out sequences longer than this to avoid NCCL timeout. Set to empty string "" to disable filtering
 BATCH_PER_DEVICE=1
-GRAD_ACCUM_STEPS=32
+GRAD_ACCUM_STEPS=8
 RANDOM_SEED=42
 DATASET_CONFIG="${DATASET_CONFIG:-default}"
 DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
@@ -45,7 +44,7 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
 MAX_STEPS=2100
 LR=1e-5
 LVR_HEAD=True
-LVR_HEAD_TYPE="ivr"  # Options: simple, glu, attention-mask, slot-attention, ivr, implicit-visual-routing
+LVR_HEAD_TYPE="attention-mask"  # Options: simple, glu, attention-mask, slot-attention, ivr, implicit-visual-routing, intrinsic-similarity, isg
 
 # IVR (Implicit Visual Routing) 参数
 IVR_ITERATIONS="${IVR_ITERATIONS:-3}"  # 路由迭代次数，默认3
@@ -57,8 +56,8 @@ LVR_LOSS_FCT=mse
 LAMBDA_LVR=0.1
 MAX_TOKEN=5120
 MIN_TOKEN=128
-RUN_NAME="Stage1_IVR_iter${IVR_ITERATIONS}_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}-MaxVisToken${MAX_TOKEN}-MinVisToken${MIN_TOKEN}"
-OUTPUT_DIR="result/stage1_checkpoints_7b_ivr/${RUN_NAME}/"
+RUN_NAME="SFT_${LVR_HEAD_TYPE}_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}"
+OUTPUT_DIR="result/${LVR_HEAD_TYPE}/${RUN_NAME}/"
 
 mkdir -p logs "$OUTPUT_DIR"
 MASTER_PORT="${MASTER_PORT:-29500}"
@@ -68,7 +67,7 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --run_name \"$RUN_NAME\" \
     --coconut True \
     --loss_lvr_fct $LVR_LOSS_FCT \
-    --deepspeed scripts/zero3_offload_disk_optimized.json \
+    --deepspeed scripts/zero3_offload.json \
     --model_id $MODEL_NAME \
     --data_path \"$DATA_PATH\" \
     --remove_unused_columns False \

@@ -12,7 +12,7 @@ from src.trainer import QwenSFTTrainer
 from src.dataset import make_supervised_data_module
 from src.params_vanilla import DataArguments, ModelArguments, TrainingArguments
 
-from train.train_utils import safe_save_model_for_hf_trainer
+from src.train.train_utils import safe_save_model_for_hf_trainer
 from monkey_patch_forward import replace_qwen2_5_with_mixed_modality_forward
 
 from src.s3_checkpoints_lvr import OCIFolderCheckpointHandler, create_temp_dir

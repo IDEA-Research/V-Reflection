@@ -28,8 +28,6 @@ DATA_PACKING=True
 LST=4096 #4096
 MAX_INSTANCE_PER_BATCH=4
 MAX_PACKED_TOKENS=$((MAX_INSTANCE_PER_BATCH * LST))
-MAX_SEQ_LENGTH_FILTER=""  # Filter out sequences longer than this to avoid NCCL timeout. Set to empty string "" to disable filtering
-# Note: If MAX_SEQ_LENGTH_FILTER is empty, the argument will not be passed (handled below)
 BATCH_PER_DEVICE=1
 GRAD_ACCUM_STEPS=8
 RANDOM_SEED=42
@@ -91,8 +89,7 @@ deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --max_packed_tokens $MAX_PACKED_TOKENS \
     --random_seed $RANDOM_SEED \
     --long_seq_threshold $LST \
-    --max_instance_per_batch $MAX_INSTANCE_PER_BATCH \
-    $([ -n "$MAX_SEQ_LENGTH_FILTER" ] && echo "--max_seq_length_filter $MAX_SEQ_LENGTH_FILTER" || echo "")
+    --max_instance_per_batch $MAX_INSTANCE_PER_BATCH
 
 if [ $? -ne 0 ]; then
     echo "Error: Training failed"

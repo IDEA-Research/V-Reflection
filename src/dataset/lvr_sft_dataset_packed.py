@@ -562,10 +562,10 @@ class IterableSupervisedDatasetLVR(Dataset):
             
             # Debug: Log lvr_token_idxs_list before creating tensors
             worker_id_str = getattr(self, 'worker_id', 'unknown')
-            print(f"[BEFORE_CREATE_LVR_TOKENS] data_idx={i}, worker_id={worker_id_str}, "
-                  f"lvr_token_idxs_list_length={len(lvr_token_idxs_list)}, "
-                  f"lvr_token_idxs_list={[[len(g) for g in lvr_token_idxs_list]]}, "
-                  f"image_grid_thw={image_grid_thw[0].tolist()}", flush=True)
+            # print(f"[BEFORE_CREATE_LVR_TOKENS] data_idx={i}, worker_id={worker_id_str}, "
+            #       f"lvr_token_idxs_list_length={len(lvr_token_idxs_list)}, "
+            #       f"lvr_token_idxs_list={[[len(g) for g in lvr_token_idxs_list]]}, "
+            #       f"image_grid_thw={image_grid_thw[0].tolist()}", flush=True)
             
             for group_idx, group in enumerate(lvr_token_idxs_list):
                 if len(group) == 0:
@@ -581,9 +581,9 @@ class IterableSupervisedDatasetLVR(Dataset):
                           f"image_grid_thw={image_grid_thw[0].tolist()}", flush=True)
                 
                 token_tensor = torch.tensor(group, dtype=torch.int)
-                print(f"[CREATE_LVR_TOKEN] group_idx={group_idx}, group_length={len(group)}, "
-                      f"tensor_shape={token_tensor.shape}, tensor_numel={token_tensor.numel()}, "
-                      f"empty={token_tensor.numel() == 0}, data_idx={i}, worker_id={worker_id_str}", flush=True)
+                # print(f"[CREATE_LVR_TOKEN] group_idx={group_idx}, group_length={len(group)}, "
+                #       f"tensor_shape={token_tensor.shape}, tensor_numel={token_tensor.numel()}, "
+                #       f"empty={token_tensor.numel() == 0}, data_idx={i}, worker_id={worker_id_str}", flush=True)
                 lvr_tokens.append(token_tensor)
             
             # CRITICAL: Double-check after creating tensors - skip if ANY lvr_tokens are empty

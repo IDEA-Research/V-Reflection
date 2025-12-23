@@ -16,9 +16,6 @@ BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-/comp_robot/zhoujiazhou/projects/Act
 
 # Auto-detect all checkpoint directories
 # If CHECKPOINT_STEPS is not set, automatically find all checkpoints
-# DEBUG MODE: Set TEST_SINGLE_CK=true to test only the first checkpoint
-TEST_SINGLE_CK="${TEST_SINGLE_CK:-true}"  # Default to true for debugging
-
 if [ -z "${CHECKPOINT_STEPS+x}" ]; then
     echo "Auto-detecting checkpoints in: $BASE_CHECKPOINT_DIR"
     # Find all checkpoint directories recursively
@@ -34,37 +31,9 @@ if [ -z "${CHECKPOINT_STEPS+x}" ]; then
         CHECKPOINT_STEPS+=("$step")
     done <<< "$CHECKPOINT_DIRS"
     echo "Found checkpoints: ${CHECKPOINT_STEPS[*]}"
-    
-    # DEBUG MODE: Only test the first checkpoint
-    if [ "$TEST_SINGLE_CK" = "true" ] || [ "$TEST_SINGLE_CK" = "True" ] || [ "$TEST_SINGLE_CK" = "1" ]; then
-        if [ ${#CHECKPOINT_STEPS[@]} -gt 0 ]; then
-            FIRST_CK="${CHECKPOINT_STEPS[0]}"
-            CHECKPOINT_STEPS=("$FIRST_CK")
-            echo ""
-            echo "============================================================================"
-            echo "DEBUG MODE: Testing only first checkpoint: checkpoint-${FIRST_CK}"
-            echo "Set TEST_SINGLE_CK=false to test all checkpoints"
-            echo "============================================================================"
-            echo ""
-        fi
-    fi
 else
     # Use manually specified checkpoint steps
     CHECKPOINT_STEPS=(${CHECKPOINT_STEPS[@]})
-    
-    # DEBUG MODE: Only test the first checkpoint if TEST_SINGLE_CK is true
-    if [ "$TEST_SINGLE_CK" = "true" ] || [ "$TEST_SINGLE_CK" = "True" ] || [ "$TEST_SINGLE_CK" = "1" ]; then
-        if [ ${#CHECKPOINT_STEPS[@]} -gt 0 ]; then
-            FIRST_CK="${CHECKPOINT_STEPS[0]}"
-            CHECKPOINT_STEPS=("$FIRST_CK")
-            echo ""
-            echo "============================================================================"
-            echo "DEBUG MODE: Testing only first checkpoint: checkpoint-${FIRST_CK}"
-            echo "Set TEST_SINGLE_CK=false to test all checkpoints"
-            echo "============================================================================"
-            echo ""
-        fi
-    fi
 fi
 
 # Evaluation step list
@@ -134,7 +103,7 @@ echo "This will convert all DeepSpeed Zero-3 checkpoints to standard format"
 echo "to avoid slow conversion during evaluation."
 echo ""
 
-# Convert only the checkpoints we're going to test (for debugging, only convert first checkpoint)
+# Convert all checkpoints we're going to test
 for step in "${CHECKPOINT_STEPS[@]}"; do
     checkpoint_path=$(find "$BASE_CHECKPOINT_DIR" -type d -name "checkpoint-${step}" | head -n 1)
     if [ -z "$checkpoint_path" ]; then
@@ -184,7 +153,7 @@ for step in "${CHECKPOINT_STEPS[@]}"; do
 done
 
 echo ""
-echo "✓ Checkpoint conversion completed for test checkpoints!"
+echo "✓ Checkpoint conversion completed for all checkpoints!"
 
 echo ""
 echo "============================================================================"
@@ -285,9 +254,10 @@ run_evaluation() {
     echo "============================================================================"
     
     # Generate run_name from checkpoint path
-    # evaluation.py generates run_name from full checkpoint path
-    # Format: comp_robot_zhoujiazhou_projects_Active-Coconut_result_..._checkpoint-XXX
-    local run_name=$(echo "$checkpoint_path" | sed 's|/|_|g' | sed 's|^_||')
+    # evaluation.py generates run_name from full checkpoint path using: '_'.join(chkpt_pth.split('/')[0:])
+    # For absolute paths starting with '/', this creates a leading underscore: _comp_robot_zhoujiazhou_...
+    # Format: _comp_robot_zhoujiazhou_projects_Active-Coconut_result_..._checkpoint-XXX
+    local run_name=$(echo "$checkpoint_path" | sed 's|/|_|g')
     
     # Calculate accuracy for blink dataset
     local blink_json_path="${PROJECT_ROOT}/evaluation/results/blink/decoding_by_steps/${run_name}/steps004.json"

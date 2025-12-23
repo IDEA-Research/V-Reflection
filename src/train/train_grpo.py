@@ -10,7 +10,7 @@ from src.trainer import QwenGRPOTrainer
 from src.dataset import make_grpo_data_module
 from transformers import AutoProcessor, AutoConfig, HfArgumentParser
 from src.params import DataArguments, ModelArguments, GRPOArguments
-from train.train_utils import safe_save_model_for_hf_trainer
+from src.train.train_utils import safe_save_model_for_hf_trainer
 from monkey_patch_forward_lvr_rl import replace_qwen2_5_with_mixed_modality_forward_lvr_rl
 from src.utils import  load_reward_funcs
 

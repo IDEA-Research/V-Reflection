@@ -13,7 +13,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from datasets import load_dataset
+from datasets import load_dataset, load_from_disk
 from tqdm import tqdm
 from src.model.qwen_lvr_model import QwenWithLVR
 from transformers import AutoTokenizer, AutoProcessor, AutoConfig, Qwen2_5_VLForConditionalGeneration
@@ -543,13 +543,57 @@ def load_mmvp_dataset(gen_w_head,run_name,decoding_strategy):
 from datasets import get_dataset_config_names
 def load_blink_dataset(gen_w_head,run_name,decoding_strategy):
     ds_name = "blink"
-    # Load BLINK dataset from HuggingFace and save to specified directory
+    # Load BLINK dataset from local cache or HuggingFace
     blink_cache_dir = os.path.join(DATASETS_DIR, "BLINK")
     os.makedirs(blink_cache_dir, exist_ok=True)
     configs = [ 'Counting','IQ_Test', 'Jigsaw', 'Relative_Reflectance', 'Spatial_Relation']
     all_datasets = {}
+    
+    # Set offline mode to prevent network requests if dataset is already cached
+    original_offline = os.environ.get('HF_DATASETS_OFFLINE', '0')
+    dataset_hash = "a3666eb249237ba3d5eca8db21176cc47967e040"
+    
     for config in configs:
-        all_datasets[config] = load_dataset("BLINK-Benchmark/BLINK", config, cache_dir=blink_cache_dir)
+        # Check if dataset exists in local cache
+        val_path = os.path.join(blink_cache_dir, f"BLINK-Benchmark___blink", config, "0.0.0", dataset_hash)
+        val_file = os.path.join(val_path, "blink-val.arrow")
+        
+        if os.path.exists(val_file):
+            # Dataset exists locally, load directly from arrow file to avoid network requests
+            print(f"Loading {config} from local cache: {val_file}")
+            try:
+                from datasets import Dataset
+                import pyarrow as pa
+                # Load validation split
+                table = pa.ipc.open_file(val_file).read_all()
+                val_dataset = Dataset.from_arrow(table)
+                
+                # Try to load test split if exists
+                test_file = os.path.join(val_path, "blink-test.arrow")
+                if os.path.exists(test_file):
+                    test_table = pa.ipc.open_file(test_file).read_all()
+                    test_dataset = Dataset.from_arrow(test_table)
+                    all_datasets[config] = {'val': val_dataset, 'test': test_dataset}
+                else:
+                    all_datasets[config] = {'val': val_dataset}
+            except Exception as e:
+                print(f"Warning: Failed to load {config} from arrow file: {e}")
+                print(f"Falling back to HuggingFace load_dataset...")
+                # Fallback to HuggingFace load_dataset
+                os.environ['HF_DATASETS_OFFLINE'] = '1'  # Force offline mode
+                try:
+                    all_datasets[config] = load_dataset(
+                        "BLINK-Benchmark/BLINK", 
+                        config, 
+                        cache_dir=blink_cache_dir,
+                        download_mode="reuse_cache_if_exists"
+                    )
+                finally:
+                    os.environ['HF_DATASETS_OFFLINE'] = original_offline
+        else:
+            # Dataset not in cache, load from HuggingFace
+            print(f"Loading {config} from HuggingFace...")
+            all_datasets[config] = load_dataset("BLINK-Benchmark/BLINK", config, cache_dir=blink_cache_dir)
     # ds = load_dataset("BLINK-Benchmark/BLINK")
     image_dir = None
 

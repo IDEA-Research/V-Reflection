@@ -101,7 +101,6 @@ class TrainingArguments(HFTrainingArguments):
     long_seq_threshold:Optional[int] = field(default=4096, metadata={"help": "Threshold to be a long single instance"})
     max_instance_per_batch:Optional[int] = 4
     max_steps:Optional[int] = 2500
-    max_seq_length_filter:Optional[int] = field(default=None, metadata={"help": "Filter out sequences longer than this length (in tokens). None means no filtering. Recommended: 3000 to avoid NCCL timeout in DeepSpeed ZeRO-3"})
 
     mode_switch_loss: Optional[bool] = False
     loss_mode_switch_fct: Optional[str] = field(default="mse")

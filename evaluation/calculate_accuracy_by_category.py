@@ -123,7 +123,7 @@ def main():
         json_file_path = sys.argv[1]
     else:
         # 默认使用当前打开的文件路径
-        json_file_path = "/comp_robot/zhoujiazhou/projects/Active-Coconut/evaluation/results/blink/decoding_by_steps/_comp_robot_zhoujiazhou_projects_Active-Coconut_stage1_checkpoints_7b_checkpoint-2500/steps004.json"
+        json_file_path = "/comp_robot/zhoujiazhou/projects/Active-Coconut/evaluation/results/vstar_bench/decoding_by_steps/_comp_robot_zhoujiazhou_projects_Active-Coconut_result_stage1_checkpoints_7b_intrinsic-similarity_Stage1_ISG_steps2100_b1_mseLVR0.1-MaxVisToken5120-MinVisToken128_checkpoint-500/steps004.json"
     
     # 检查文件是否存在
     if not os.path.exists(json_file_path):

@@ -53,7 +53,7 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 
 
-from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadSlotAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus
+from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadSlotAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity
 
 class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
@@ -165,10 +165,29 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 use_output_norm=use_output_norm,
                 chunk_size=chunk_size
             )
+        elif lvr_head_type == 'intrinsic-similarity' or lvr_head_type == 'isg':
+            # Intrinsic Similarity Gating (ISG): Zero-parameter visual routing mechanism
+            # Key advantages:
+            #   - Completely parameter-free (except optional output normalization)
+            #   - Uses intrinsic similarity between LLM hidden states and visual features
+            #   - Excellent numerical stability
+            # Key parameters:
+            #   chunk_size: chunk size for long sequences (default: 512, None means auto-select)
+            #   use_output_norm: whether to use output normalization (default: True)
+            chunk_size = getattr(self.config, 'isg_chunk_size', None)  # None means auto-select
+            use_output_norm = getattr(self.config, 'isg_use_output_norm', True)
+            
+            print(f"Using Intrinsic Similarity Gating (ISG) LVR Head with "
+                  f"chunk_size={chunk_size}, use_output_norm={use_output_norm}")
+            self.lvr_head = LVRHeadIntrinsicSimilarity(
+                hidden_size=self.config.hidden_size,
+                use_output_norm=use_output_norm,
+                chunk_size=chunk_size
+            )
         else:
             # Raise an error for an unknown variant to prevent silent failures
             raise ValueError(f"Unknown lvr_head_type: '{lvr_head_type}'. "
-                             "Supported variants are 'simple', 'glu', 'attention-mask', 'slot-attention', 'ivr', 'implicit-visual-routing', 'gated-focus', 'gfr'.")
+                             "Supported variants are 'simple', 'glu', 'attention-mask', 'slot-attention', 'ivr', 'implicit-visual-routing', 'gated-focus', 'gfr', 'intrinsic-similarity', 'isg'.")
         self.config.lvr_head_type = lvr_head_type
         
     def _init_lvr_latent_end_emb(self):
