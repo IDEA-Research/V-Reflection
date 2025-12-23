@@ -38,9 +38,11 @@ logs/
 *.log
 result/
 wandb/
+doc/
 
 # Data (uncomment if you don't want to commit data)
-# data/
+data/
+evaluation/results/
 
 # OS
 .DS_Store
