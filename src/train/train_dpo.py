@@ -2,7 +2,7 @@ import os
 import torch
 from peft import LoraConfig, get_peft_model
 import ast
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
 from src.trainer import QwenDPOTrainer
 from src.dataset import make_dpo_data_module
 from src.params import DataArguments, ModelArguments, DPOArguments
@@ -101,53 +101,33 @@ def train():
     local_rank = training_args.local_rank
     compute_dtype = (torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
 
-    bnb_model_from_pretrained_args = {}
-    if training_args.bits in [4,8]:
-        bnb_model_from_pretrained_args.update(dict(
-            device_map={"":training_args.device},
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=training_args.bits==4,
-                load_in_8bit=training_args.bits==8,
-                llm_int8_skip_modules=["visual", "lm_head"],
-                llm_int8_threshold=6.0,
-                llm_int8_has_fp16_weight=False,
-                bnb_4bit_compute_dtype=compute_dtype,
-                bnb_4bit_use_double_quant=training_args.double_quant,
-                bnb_4bit_quant_type=training_args.quant_type,
-            )
-        ))
-
     ref_model = None
 
     if "Qwen2.5" in model_args.model_id:
         model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
             model_args.model_id,
             torch_dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-            **bnb_model_from_pretrained_args
+            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa"
         )
 
         if not training_args.lora_enable:
             ref_model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 model_args.model_id,
                 torch_dtype=compute_dtype,
-                attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-                **bnb_model_from_pretrained_args
+                attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa"
             )
 
     else:
         model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_args.model_id,
             torch_dtype=compute_dtype,
-            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-            **bnb_model_from_pretrained_args
+            attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa"
         )
         if not training_args.lora_enable:
             ref_model = Qwen2VLForConditionalGeneration.from_pretrained(
                 model_args.model_id,
                 torch_dtype=compute_dtype,
-                attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa", 
-                **bnb_model_from_pretrained_args
+                attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa"
             )
 
     model.config.use_cache = False
@@ -155,11 +135,6 @@ def train():
     configure_llm(model_to_configure, training_args)
     configure_vision_tower(model_to_configure, training_args, compute_dtype, training_args.device)
 
-    if training_args.bits in [4,8]:
-        model.config.torch_dtype = (torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32))
-        from peft import prepare_model_for_kbit_training
-        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing, gradient_checkpointing_kwargs={"use_reentrant": True})
-    
     if training_args.gradient_checkpointing:
         model.enable_input_require_grads()
         training_args.gradient_checkpointing_kwargs = {"use_reentrant": True}
@@ -173,11 +148,10 @@ def train():
             lora_dropout=training_args.lora_dropout,
             bias=training_args.lora_bias
         )
-        if training_args.bits == 16:
-            if training_args.bf16:
-                model.to(torch.bfloat16)
-            if training_args.fp16:
-                model.to(torch.float16)
+        if training_args.bf16:
+            model.to(torch.bfloat16)
+        if training_args.fp16:
+            model.to(torch.float16)
         rank0_print("Adding LoRA to the model...")
         model = get_peft_model(model, peft_config)
 
@@ -203,20 +177,6 @@ def train():
     if ref_model is not None:
         ref_model.eval()
         ref_model.config.use_cache = False
-
-    if training_args.bits in [4, 8]:
-        from peft.tuners.lora import LoraLayer
-        for name, module in model.named_modules():
-            if isinstance(module, LoraLayer):
-                if training_args.bf16:
-                    module = module.to(torch.bfloat16)
-            if 'norm' in name:
-                module = module.to(torch.float32)
-            
-            if 'lm_head' in name or 'embed_token' in name:
-                if hasattr(module, 'weight'):
-                    if training_args.bf16 and module.weight.dtype == torch.float32:
-                        module = module.to(torch.bfloat16)
 
     dataset_module = make_dpo_data_module(model_id=model_args.model_id,
                                               processor=processor,

@@ -39,14 +39,17 @@ logs/
 result/
 wandb/
 doc/
+lvr-main/
+checkpoints/
 
 # Data (uncomment if you don't want to commit data)
 data/
-evaluation/results/
-
+evaluation/
 # OS
 .DS_Store
 Thumbs.db
+core
+core.*
 
 # Jupyter Notebook
 .ipynb_checkpoints

@@ -35,18 +35,6 @@ class TrainingArguments(HFTrainingArguments):
         },
     )
 
-    double_quant: bool = field(
-        default=True,
-        metadata={"help": "Compress the quantization statistics through double quantization."}
-    )
-    quant_type: str = field(
-        default="nf4",
-        metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
-    )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
     lora_enable: bool = False
     vision_lora: bool = False
     use_dora: bool = False
@@ -89,18 +77,6 @@ class GRPOArguments(GRPOConfigTRL):
     freeze_llm: bool = field(default=False)
     freeze_merger: bool = field(default=False)
     disable_flash_attn2: bool = field(default=False)
-    double_quant: bool = field(
-        default=True,
-        metadata={"help": "Compress the quantization statistics through double quantization."}
-    )
-    quant_type: str = field(
-        default="nf4",
-        metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
-    )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
     lora_enable: bool = False
     vision_lora: bool = False
     use_dora: bool = False

@@ -31,16 +31,34 @@ def replace_image_tokens(input_string, is_video=False):
 
     return re.sub(pattern, replacement, input_string)
 
-def replace_lvr_tokens(input_string,lvr_token_idxs_list,latent_end_token,fixed_num_of_lvr_tokens):
-    '''video not implemented'''
+def replace_lvr_tokens(input_string,lvr_token_idxs_list,latent_end_token,fixed_num_of_lvr_tokens,use_fixed_num_lvr_tokens=False):
+    '''
+    video not implemented
+
+    Args:
+        use_fixed_num_lvr_tokens: If True, uses hidden state passing mechanism (no actual <|lvr|> tokens)
+                                 Only <|lvr_start|> and <|lvr_end|> markers are generated
+                                 During inference: hidden state passing controlled by lvr_steps parameter
+    '''
     pattern = r'\n?' + re.escape(LVR_PLACEHOLDER) + r'\n?'
     if re.search(pattern, input_string):
         input_segments = input_string.split(LVR_PLACEHOLDER)[1:]
         output_segments = []
-        if fixed_num_of_lvr_tokens is not None:
-            # we do not extract lvr_tokens from original image in this mode
+        if use_fixed_num_lvr_tokens:
+            # Fixed N LVR mode with hidden state passing:
+            # Only generate <|lvr_start|> and <|lvr_end|> markers, NO <|lvr|> tokens in between
+            # During training: use hidden state passing + MLP loss
+            # During inference: hidden state passing controlled by lvr_steps=[16]
             for seg in input_segments:
-                replacement = LVR_START_TOKEN + LVR_TOKEN*fixed_num_of_lvr_tokens + LVR_END_TOKEN
+                replacement = LVR_START_TOKEN + LVR_END_TOKEN  # No <|lvr|> tokens in between!
+                output_segments.append(replacement+seg)
+        elif fixed_num_of_lvr_tokens is not None:
+            # Fixed N LVR tokens per segment (e.g. 8 for BoxFeatureResampler); optional latent_end
+            for seg in input_segments:
+                if latent_end_token:
+                    replacement = LVR_START_TOKEN + LVR_TOKEN*fixed_num_of_lvr_tokens + LVR_LATENT_END_TOKEN + LVR_END_TOKEN
+                else:
+                    replacement = LVR_START_TOKEN + LVR_TOKEN*fixed_num_of_lvr_tokens + LVR_END_TOKEN
                 output_segments.append(replacement+seg)
         else:
             for seg,idxs in zip(input_segments,lvr_token_idxs_list):
@@ -55,7 +73,7 @@ def replace_lvr_tokens(input_string,lvr_token_idxs_list,latent_end_token,fixed_n
 
 
 
-def llava_to_openai_lvr(conversations, is_video=False, lvr_token_idxs_list=None, latent_end_token=False, fixed_num_of_lvr_tokens=None):
+def llava_to_openai_lvr(conversations, is_video=False, lvr_token_idxs_list=None, latent_end_token=False, fixed_num_of_lvr_tokens=None, use_fixed_num_lvr_tokens=False):
 
     # assert lvr_token_idxs_list is not None
 
@@ -64,7 +82,7 @@ def llava_to_openai_lvr(conversations, is_video=False, lvr_token_idxs_list=None,
     transformed_data = []
     for conversation in conversations:
         transformed_content = replace_image_tokens(conversation["value"], is_video=is_video)
-        transformed_content = replace_lvr_tokens(transformed_content,lvr_token_idxs_list,latent_end_token,fixed_num_of_lvr_tokens)
+        transformed_content = replace_lvr_tokens(transformed_content,lvr_token_idxs_list,latent_end_token,fixed_num_of_lvr_tokens,use_fixed_num_lvr_tokens)
         transformed_entry = {
             "role": role_mapping.get(conversation["from"], conversation["from"]),
             "content": transformed_content,

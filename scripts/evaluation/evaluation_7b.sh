@@ -22,6 +22,27 @@ GPU_ID="${GPU_ID:-0}"  # GPUs to use for parallel evaluation
 USE_MULTI_PROCESS=True  # Launch multiple processes for true parallelism
 
 EVAL_STEP_LIST="${EVAL_STEP_LIST:-4}"  # Default: 4,8,16
+
+# Force re-evaluation: always re-run inference even if result files exist
+# Set to 1 to force re-evaluation, 0 to use existing results if available
+FORCE_RE_EVALUATE="${FORCE_RE_EVALUATE:-0}"
+export FORCE_RE_EVALUATE
+
+# Activation map visualization control
+# Set to "1" to enable saving activation maps for LVR heads (gated-focus, intrinsic-similarity)
+# Activation maps will be saved to: evaluation/results/{benchmark}/decoding_by_{strategy}/{run_name}/{checkpoint_num}/activation_maps/
+# Default: "0" (disabled) - Can be overridden via environment variable
+LVR_SAVE_ACTIVATION_MAPS="${LVR_SAVE_ACTIVATION_MAPS:-0}"  # Default: 0 (disabled)
+export LVR_SAVE_ACTIVATION_MAPS
+
+# DiT image generation control (for DiT Recon models)
+# Set to "1" to enable DiT image generation during inference
+DIT_GENERATE_IMAGES="${DIT_GENERATE_IMAGES:-0}"
+DIT_SAVE_DIR="${DIT_SAVE_DIR:-}"
+DIT_NUM_INFERENCE_STEPS="${DIT_NUM_INFERENCE_STEPS:-20}"
+DIT_DEBUG="${DIT_DEBUG:-0}"
+export DIT_GENERATE_IMAGES DIT_SAVE_DIR DIT_NUM_INFERENCE_STEPS DIT_DEBUG
+
 # ============================================================================
 
 # Initialize conda if available
@@ -64,7 +85,18 @@ if [ "$USE_MULTI_PROCESS" = "True" ] || [ "$USE_MULTI_PROCESS" = "true" ]; then
         for i in "${!GPU_ARRAY[@]}"; do
             gpu="${GPU_ARRAY[$i]}"
             echo "Starting process $((i+1))/${TOTAL_GPUS} on GPU $gpu"
-            EVAL_PROCESS_ID=$i EVAL_TOTAL_PROCESSES=$TOTAL_GPUS EVAL_CHECKPOINT_PATH="${EVAL_CHECKPOINT_PATH:-$CHECKPOINT_PATH}" EVAL_STEP_LIST="$EVAL_STEP_LIST" HF_ENDPOINT="$HF_ENDPOINT" CUDA_VISIBLE_DEVICES="$gpu" \
+            EVAL_PROCESS_ID=$i \
+            EVAL_TOTAL_PROCESSES=$TOTAL_GPUS \
+            EVAL_CHECKPOINT_PATH="${EVAL_CHECKPOINT_PATH:-$CHECKPOINT_PATH}" \
+            EVAL_STEP_LIST="$EVAL_STEP_LIST" \
+            LVR_SAVE_ACTIVATION_MAPS="$LVR_SAVE_ACTIVATION_MAPS" \
+            FORCE_RE_EVALUATE="$FORCE_RE_EVALUATE" \
+            DIT_GENERATE_IMAGES="$DIT_GENERATE_IMAGES" \
+            DIT_SAVE_DIR="$DIT_SAVE_DIR" \
+            DIT_NUM_INFERENCE_STEPS="$DIT_NUM_INFERENCE_STEPS" \
+            DIT_DEBUG="$DIT_DEBUG" \
+            HF_ENDPOINT="$HF_ENDPOINT" \
+            CUDA_VISIBLE_DEVICES="$gpu" \
                 python "$EVAL_SCRIPT" "$@" > "${PROJECT_ROOT}/evaluation/eval_gpu${gpu}.log" 2>&1 &
             PIDS+=($!)
         done
@@ -98,6 +130,8 @@ else
     
     export EVAL_CHECKPOINT_PATH="${EVAL_CHECKPOINT_PATH:-$CHECKPOINT_PATH}"
     export EVAL_STEP_LIST="$EVAL_STEP_LIST"
+    export LVR_SAVE_ACTIVATION_MAPS="$LVR_SAVE_ACTIVATION_MAPS"
+    export FORCE_RE_EVALUATE="$FORCE_RE_EVALUATE"
     python "$EVAL_SCRIPT" "$@"
 fi
 

@@ -1,6 +1,7 @@
 import os
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import wandb
 from transformers import Trainer
 from transformers.trainer import (
@@ -144,19 +145,6 @@ class QwenLVRSFTTrainer(Trainer):
             optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(self.args)
 
             self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
-            if optimizer_cls.__name__ == "Adam8bit":
-                import bitsandbytes
-
-                manager = bitsandbytes.optim.GlobalOptimManager.get_instance()
-
-                skipped = 0
-                for module in opt_model.modules():
-                    if isinstance(module, nn.Embedding):
-                        skipped += sum({p.data_ptr(): p.numel() for p in module.parameters()}.values())
-                        logger.info(f"skipped {module}: {skipped/2**20}M params")
-                        manager.register_module_override(module, "weight", {"optim_bits": 32})
-                        logger.debug(f"bitsandbytes: will optimize {module} in fp32")
-                logger.info(f"skipped: {skipped/2**20}M params")
 
         return self.optimizer
     
@@ -175,7 +163,33 @@ class QwenLVRSFTTrainer(Trainer):
         run_dir = self._get_output_dir(trial=trial)
         # output_dir is the local path forcheckpoint
         output_dir = os.path.join(run_dir, checkpoint_folder)
-        self.save_model(output_dir, _internal_call=True)
+        
+        # Clean up Tensor objects from config before saving to avoid JSON serialization errors
+        # Store original values temporarily and restore after saving
+        config_tensor_backup = {}
+        if hasattr(self.model, 'config'):
+            config = self.model.config
+            # Check all attributes in config for Tensor objects
+            # Use __dict__ to get actual attributes, avoiding methods and properties
+            if hasattr(config, '__dict__'):
+                for attr_name in list(config.__dict__.keys()):
+                    try:
+                        attr_value = getattr(config, attr_name, None)
+                        if isinstance(attr_value, torch.Tensor):
+                            config_tensor_backup[attr_name] = attr_value
+                            # Remove Tensor from config to allow JSON serialization
+                            delattr(config, attr_name)
+                    except (AttributeError, TypeError, RuntimeError):
+                        pass
+        
+        try:
+            self.save_model(output_dir, _internal_call=True)
+        finally:
+            # Restore Tensor attributes after saving
+            if hasattr(self.model, 'config'):
+                config = self.model.config
+                for attr_name, attr_value in config_tensor_backup.items():
+                    setattr(config, attr_name, attr_value)
 
         if self.args.save_strategy in [SaveStrategy.STEPS, SaveStrategy.EPOCH] and self.state.best_global_step:
             best_checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.best_global_step}"
@@ -244,9 +258,17 @@ class QwenLVRSFTTrainer(Trainer):
         model_ref = model
         self._current_model = model  # Store for debug logging
         
-        # Filter out debug keys before passing to model (model forward doesn't accept them)
+        # Filter out debug keys before passing to model
+        # cropped_bbox_images is needed for DiT reconstruction loss when use_dit_reconstruction is enabled
         model_inputs = {k: v for k, v in inputs.items() if not k.startswith('_debug_')}
         
+        # Helper: current rank for debug prints (so we know which rank had the issue)
+        def _rank():
+            try:
+                return dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", 0))
+            except Exception:
+                return int(os.environ.get("RANK", 0))
+
         # CRITICAL: Assertion check for NaN/Inf in inputs BEFORE forward pass
         # This prevents NaN from propagating through the model and causing NCCL hangs
         # If detected, skip this sample and return safe zero loss
@@ -312,15 +334,15 @@ class QwenLVRSFTTrainer(Trainer):
         
         # Assertion: If NaN detected in inputs, skip this sample and return safe zero loss
         if nan_in_inputs:
-            # Print detailed debug information about the problematic data
+            rank = _rank()
             self._log_debug_info(inputs, "input_nan_detected")
-            print(f"[TRAIN.compute_loss] ASSERTION FAILED | step={self.state.global_step} | "
+            print(f"[TRAIN.compute_loss] ASSERTION FAILED | rank={rank} step={self.state.global_step} | "
                   f"NaN/Inf detected in inputs before forward pass!", flush=True)
-            print(f"[TRAIN.compute_loss] Location: {nan_location}", flush=True)
+            print(f"[TRAIN.compute_loss] rank={rank} Location: {nan_location}", flush=True)
             for key, details in nan_details.items():
-                print(f"[TRAIN.compute_loss]   {key}: NaN={details.get('nan_count', 0)}, "
+                print(f"[TRAIN.compute_loss] rank={rank}   {key}: NaN={details.get('nan_count', 0)}, "
                       f"Inf={details.get('inf_count', 0)}, Total={details.get('total', details.get('valid_labels', 'N/A'))}", flush=True)
-            print(f"[TRAIN.compute_loss] Skipping this sample and returning zero loss to prevent NaN propagation.", flush=True)
+            print(f"[TRAIN.compute_loss] rank={rank} Skipping this sample and returning zero loss to prevent NaN propagation.", flush=True)
             
             # Return a safe zero loss tensor on the correct device
             # Use input_ids device as reference
@@ -337,6 +359,8 @@ class QwenLVRSFTTrainer(Trainer):
                 def __init__(self, device, dtype):
                     self.loss_ce = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss_lvr = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+                    self.loss_lvr_resampler = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+                    self.loss_dit_recon = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss_mode_switch = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss = zero_loss
             
@@ -351,6 +375,8 @@ class QwenLVRSFTTrainer(Trainer):
         # loss = outputs.loss  # total loss
         loss_ce = outputs.loss_ce
         loss_lvr = outputs.loss_lvr
+        loss_lvr_resampler = getattr(outputs, 'loss_lvr_resampler', None)
+        loss_dit_recon = getattr(outputs, 'loss_dit_recon', None)
         loss_mode_switch = outputs.loss_mode_switch
 
         # NaN detection and protection for individual loss components
@@ -360,10 +386,10 @@ class QwenLVRSFTTrainer(Trainer):
         if loss_ce is not None:
             # Check for NaN or Inf in loss_ce
             if torch.isnan(loss_ce) or torch.isinf(loss_ce):
-                # Print debug information about the problematic data
+                rank = _rank()
                 self._log_debug_info(inputs, "loss_ce")
                 self._log_detailed_debug_info(model_inputs, "loss_ce")
-                print(f"[TRAIN.compute_loss] WARNING | step={self.state.global_step} | "
+                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
                       f"loss_ce is NaN/Inf: {loss_ce.item()}, replacing with 0.0", flush=True)
                 # Use nan_to_num to preserve computation graph connection
                 loss_ce = torch.nan_to_num(loss_ce, nan=0.0, posinf=0.0, neginf=0.0)
@@ -374,9 +400,10 @@ class QwenLVRSFTTrainer(Trainer):
         if loss_lvr is not None:
             # Check for NaN or Inf in loss_lvr
             if torch.isnan(loss_lvr) or torch.isinf(loss_lvr):
-                # Print debug information about the problematic data
+                rank = _rank()
                 self._log_debug_info(inputs, "loss_lvr")
-                print(f"[TRAIN.compute_loss] WARNING | step={self.state.global_step} | "
+                self._log_detailed_debug_info(model_inputs, "loss_lvr")
+                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
                       f"loss_lvr is NaN/Inf: {loss_lvr.item()}, replacing with 0.0", flush=True)
                 # Use nan_to_num to preserve computation graph connection
                 loss_lvr = torch.nan_to_num(loss_lvr, nan=0.0, posinf=0.0, neginf=0.0)
@@ -387,7 +414,8 @@ class QwenLVRSFTTrainer(Trainer):
         if loss_mode_switch is not None:
             # Check for NaN or Inf in loss_mode_switch
             if torch.isnan(loss_mode_switch) or torch.isinf(loss_mode_switch):
-                print(f"[TRAIN.compute_loss] WARNING | step={self.state.global_step} | "
+                rank = _rank()
+                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
                       f"loss_mode_switch is NaN/Inf: {loss_mode_switch.item()}, replacing with 0.0", flush=True)
                 # Use nan_to_num to preserve computation graph connection
                 loss_mode_switch = torch.nan_to_num(loss_mode_switch, nan=0.0, posinf=0.0, neginf=0.0)
@@ -395,24 +423,70 @@ class QwenLVRSFTTrainer(Trainer):
                 # Clamp to prevent extreme values
                 loss_mode_switch = torch.clamp(loss_mode_switch, min=0.0, max=MAX_LOSS_VALUE)
 
+        if loss_lvr_resampler is not None:
+            if torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler):
+                rank = _rank()
+                self._log_debug_info(inputs, "loss_lvr_resampler")
+                self._log_detailed_debug_info(model_inputs, "loss_lvr_resampler")
+                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
+                      f"loss_lvr_resampler is NaN/Inf: {loss_lvr_resampler.item()}, replacing with 0.0", flush=True)
+                print(f"[TRAIN.compute_loss] rank={rank} loss_ce={loss_ce.item() if loss_ce is not None else 'None'}, "
+                      f"loss_lvr={loss_lvr.item() if loss_lvr is not None else 'None'}, "
+                      f"loss_mode_switch={loss_mode_switch.item() if loss_mode_switch is not None else 'None'}", flush=True)
+                loss_lvr_resampler = torch.nan_to_num(loss_lvr_resampler, nan=0.0, posinf=0.0, neginf=0.0)
+            else:
+                loss_lvr_resampler = torch.clamp(loss_lvr_resampler, min=0.0, max=MAX_LOSS_VALUE)
+
+        if loss_dit_recon is not None:
+            if torch.isnan(loss_dit_recon) or torch.isinf(loss_dit_recon):
+                rank = _rank()
+                self._log_debug_info(inputs, "loss_dit_recon")
+                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
+                      f"loss_dit_recon is NaN/Inf: {loss_dit_recon.item()}, replacing with 0.0", flush=True)
+                loss_dit_recon = torch.nan_to_num(loss_dit_recon, nan=0.0, posinf=0.0, neginf=0.0)
+            else:
+                loss_dit_recon = torch.clamp(loss_dit_recon, min=0.0, max=MAX_LOSS_VALUE)
+        
+        # Build combined loss based on enabled losses and their weights
         if self.args.mode_switch_loss:
             loss = loss_ce
-            if loss_lvr is not None and self.args.loss_lvr_lambda > 0:
+            # Add MSE loss if enabled and weight > 0
+            if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
                 loss = loss + self.args.loss_lvr_lambda * loss_lvr
+            # Add BoxFeatureResampler MSE loss if enabled
+            if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
+                loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
+            # Add DiT reconstruction loss if enabled
+            if loss_dit_recon is not None and getattr(self.args, 'loss_dit_recon_lambda', 0.0) > 0:
+                loss = loss + self.args.loss_dit_recon_lambda * loss_dit_recon
+            # Add mode switch loss if enabled and weight > 0
             if loss_mode_switch is not None and self.args.loss_mode_switch_lambda > 0:
                 loss = loss + self.args.loss_mode_switch_lambda * loss_mode_switch
         else:
-            if loss_lvr is not None and self.args.loss_lvr_lambda > 0:
-                loss = loss_ce + self.args.loss_lvr_lambda * loss_lvr
-            else:
-                loss = loss_ce
+            # Start with CE loss
+            loss = loss_ce
+            # Add MSE loss if enabled and weight > 0
+            if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
+                loss = loss + self.args.loss_lvr_lambda * loss_lvr
+            # Add BoxFeatureResampler MSE loss if enabled
+            if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
+                loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
+            # Add DiT reconstruction loss if enabled
+            if loss_dit_recon is not None and getattr(self.args, 'loss_dit_recon_lambda', 0.0) > 0:
+                loss = loss + self.args.loss_dit_recon_lambda * loss_dit_recon
 
         # Final NaN check and protection for combined loss
         if torch.isnan(loss) or torch.isinf(loss):
-            # Print debug information about the problematic data
+            rank = _rank()
             self._log_debug_info(inputs, "combined_loss")
-            print(f"[TRAIN.compute_loss] ERROR | step={self.state.global_step} | "
+            self._log_detailed_debug_info(model_inputs, "combined_loss")
+            print(f"[TRAIN.compute_loss] ERROR | rank={rank} step={self.state.global_step} | "
                   f"Combined loss is NaN/Inf: {loss.item()}, replacing with loss_ce only", flush=True)
+            print(f"[TRAIN.compute_loss] rank={rank} components: loss_ce={loss_ce.item() if loss_ce is not None else 'None'}, "
+                  f"loss_lvr={loss_lvr.item() if loss_lvr is not None else 'None'}, "
+                  f"loss_lvr_resampler={loss_lvr_resampler.item() if loss_lvr_resampler is not None else 'None'}, "
+                  f"loss_dit_recon={loss_dit_recon.item() if loss_dit_recon is not None else 'None'}, "
+                  f"loss_mode_switch={loss_mode_switch.item() if loss_mode_switch is not None else 'None'}", flush=True)
             # Fallback to loss_ce only if combined loss is NaN
             loss = loss_ce if loss_ce is not None else torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
@@ -424,17 +498,20 @@ class QwenLVRSFTTrainer(Trainer):
             loss_total_val = loss.detach().item()
             loss_ce_val = loss_ce.detach().item() if loss_ce is not None else 0.0
             loss_lvr_val = loss_lvr.detach().item() if loss_lvr is not None else 0.0
+            loss_lvr_resampler_val = loss_lvr_resampler.detach().item() if loss_lvr_resampler is not None else 0.0
+            loss_dit_recon_val = loss_dit_recon.detach().item() if loss_dit_recon is not None else 0.0
             loss_mode_switch_val = loss_mode_switch.detach().item() if loss_mode_switch is not None else 0.0
             
             # Check for NaN before logging
             if torch.isnan(loss) or torch.isnan(torch.tensor(loss_total_val)):
-                print(f"[TRAIN.compute_loss] CRITICAL | step={self.state.global_step} | "
+                rank = _rank()
+                print(f"[TRAIN.compute_loss] CRITICAL | rank={rank} step={self.state.global_step} | "
                       f"Loss is still NaN after protection! Using fallback loss.", flush=True)
                 # Use loss_ce if available and valid, otherwise create a valid loss with requires_grad
                 if loss_ce is not None and not torch.isnan(loss_ce) and not torch.isinf(loss_ce):
                     loss = loss_ce
                     loss_total_val = loss_ce_val
-                    print(f"[TRAIN.compute_loss] FALLBACK | Using loss_ce={loss_ce_val:.6f}", flush=True)
+                    print(f"[TRAIN.compute_loss] FALLBACK | rank={rank} Using loss_ce={loss_ce_val:.6f}", flush=True)
                 else:
                     # Create a valid loss tensor connected to the computation graph
                     # Use a small value from model output to ensure requires_grad=True
@@ -445,9 +522,9 @@ class QwenLVRSFTTrainer(Trainer):
                         # This ensures requires_grad=True and proper gradient flow
                         loss = torch.tensor(0.0, device=model_param.device, dtype=model_param.dtype) * model_param.sum() * 0.0
                         loss_total_val = 0.0
-                        print(f"[TRAIN.compute_loss] FALLBACK | Created zero loss connected to computation graph", flush=True)
+                        print(f"[TRAIN.compute_loss] FALLBACK | rank={rank} Created zero loss connected to computation graph", flush=True)
                     except Exception as fallback_error:
-                        print(f"[TRAIN.compute_loss] ERROR | Fallback creation failed: {fallback_error}", flush=True)
+                        print(f"[TRAIN.compute_loss] ERROR | rank={rank} Fallback creation failed: {fallback_error}", flush=True)
                         # Last resort: use loss_ce even if NaN (will be handled by training_step)
                         # But ensure it has requires_grad if it's a tensor
                         if loss_ce is not None and isinstance(loss_ce, torch.Tensor):
@@ -457,11 +534,14 @@ class QwenLVRSFTTrainer(Trainer):
                             loss = torch.tensor(0.0, device='cuda', dtype=torch.float32, requires_grad=True)
                         loss_total_val = 0.0
         except Exception as e:
-            print(f"[TRAIN.compute_loss] ERROR | step={self.state.global_step} | "
+            rank = _rank()
+            print(f"[TRAIN.compute_loss] ERROR | rank={rank} step={self.state.global_step} | "
                   f"Error extracting loss values: {e}, using fallback", flush=True)
             loss_total_val = 0.0
             loss_ce_val = 0.0
             loss_lvr_val = 0.0
+            loss_lvr_resampler_val = 0.0
+            loss_dit_recon_val = 0.0
             loss_mode_switch_val = 0.0
             # Try to use loss_ce if available
             try:
@@ -476,10 +556,19 @@ class QwenLVRSFTTrainer(Trainer):
                 # Ultimate fallback: use loss_ce or create basic tensor
                 loss = loss_ce if loss_ce is not None else torch.tensor(0.0, device='cuda', dtype=torch.float32, requires_grad=True)
 
+        # Periodic debug: print rank and all loss components so we can see which rank diverges
+        step = self.state.global_step
+        if step is not None and step % 100 == 0 and step > 0:
+            rank = _rank()
+            print(f"[TRAIN.compute_loss] rank={rank} step={step} | loss_total={loss_total_val:.6f} loss_ce={loss_ce_val:.6f} "
+                  f"loss_lvr={loss_lvr_val:.6f} loss_lvr_resampler={loss_lvr_resampler_val:.6f} loss_dit_recon={loss_dit_recon_val:.6f} loss_mode_switch={loss_mode_switch_val:.6f}", flush=True)
+
         self.log({
             "loss_total": loss_total_val,
             "loss_ce": loss_ce_val,
             "loss_lvr": loss_lvr_val,
+            "loss_lvr_resampler": loss_lvr_resampler_val,
+            "loss_dit_recon": loss_dit_recon_val,
             "loss_mode_switch": loss_mode_switch_val,
         })
 
@@ -488,14 +577,15 @@ class QwenLVRSFTTrainer(Trainer):
     def _log_debug_info(self, inputs, loss_type):
         """Log debug information about the data when NaN/Inf is detected"""
         try:
+            rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", 0))
             if '_debug_question' in inputs:
                 questions = inputs['_debug_question']
                 if isinstance(questions, list) and len(questions) > 0:
-                    print(f"[DEBUG] {loss_type} NaN detected - Question: {questions[0][:200]}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} NaN detected - Question: {questions[0][:200]}", flush=True)
             if '_debug_answer' in inputs:
                 answers = inputs['_debug_answer']
                 if isinstance(answers, list) and len(answers) > 0:
-                    print(f"[DEBUG] {loss_type} NaN detected - Answer: {answers[0][:200]}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} NaN detected - Answer: {answers[0][:200]}", flush=True)
             if '_debug_image_paths' in inputs:
                 image_paths = inputs['_debug_image_paths']
                 if isinstance(image_paths, list) and len(image_paths) > 0:
@@ -504,26 +594,28 @@ class QwenLVRSFTTrainer(Trainer):
                         paths_str = ', '.join(str(p)[:100] for p in first_path)
                     else:
                         paths_str = str(first_path)[:100]
-                    print(f"[DEBUG] {loss_type} NaN detected - Image paths: {paths_str}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} NaN detected - Image paths: {paths_str}", flush=True)
             if '_debug_bboxes' in inputs:
                 bboxes = inputs['_debug_bboxes']
                 if isinstance(bboxes, list) and len(bboxes) > 0:
                     bboxes_str = str(bboxes[0])[:200]
-                    print(f"[DEBUG] {loss_type} NaN detected - Bboxes: {bboxes_str}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} NaN detected - Bboxes: {bboxes_str}", flush=True)
             if '_debug_data_idx' in inputs:
                 data_indices = inputs['_debug_data_idx']
                 if isinstance(data_indices, list) and len(data_indices) > 0:
-                    print(f"[DEBUG] {loss_type} NaN detected - Data index: {data_indices[0]}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} NaN detected - Data index: {data_indices[0]}", flush=True)
         except Exception as e:
-            print(f"[DEBUG] Error logging debug info: {e}", flush=True)
+            rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", 0))
+            print(f"[DEBUG] rank={rank} Error logging debug info: {e}", flush=True)
     
     def _log_detailed_debug_info(self, model_inputs, loss_type):
         """Log detailed information about model inputs when NaN/Inf is detected"""
         try:
+            rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", 0))
             # Check input shapes
             if 'input_ids' in model_inputs:
                 input_ids = model_inputs['input_ids']
-                print(f"[DEBUG] {loss_type} - input_ids shape: {input_ids.shape}, dtype: {input_ids.dtype}", flush=True)
+                print(f"[DEBUG] rank={rank} {loss_type} - input_ids shape: {input_ids.shape}, dtype: {input_ids.dtype}", flush=True)
                 # Check for lvr token in input_ids
                 from src.constants import LVR_TOKEN
                 # Try to get lvr_token_id from model config if available
@@ -537,62 +629,63 @@ class QwenLVRSFTTrainer(Trainer):
                 if lvr_token_id is not None:
                     lvr_positions = (input_ids == lvr_token_id).nonzero(as_tuple=True)
                     if len(lvr_positions[0]) > 0:
-                        print(f"[DEBUG] {loss_type} - Found {len(lvr_positions[0])} LVR tokens in input_ids at positions: {lvr_positions[1][:10].tolist()}", flush=True)
+                        print(f"[DEBUG] rank={rank} {loss_type} - Found {len(lvr_positions[0])} LVR tokens in input_ids at positions: {lvr_positions[1][:10].tolist()}", flush=True)
                     else:
-                        print(f"[DEBUG] {loss_type} - WARNING: No LVR tokens found in input_ids!", flush=True)
+                        print(f"[DEBUG] rank={rank} {loss_type} - WARNING: No LVR tokens found in input_ids!", flush=True)
             
             if 'labels' in model_inputs:
                 labels = model_inputs['labels']
-                print(f"[DEBUG] {loss_type} - labels shape: {labels.shape}, dtype: {labels.dtype}", flush=True)
+                print(f"[DEBUG] rank={rank} {loss_type} - labels shape: {labels.shape}, dtype: {labels.dtype}", flush=True)
                 # Check for valid labels (not IGNORE_INDEX)
                 valid_labels = labels[labels != IGNORE_INDEX]
                 if len(valid_labels) > 0:
-                    print(f"[DEBUG] {loss_type} - Valid labels count: {len(valid_labels)}, min: {valid_labels.min().item()}, max: {valid_labels.max().item()}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} - Valid labels count: {len(valid_labels)}, min: {valid_labels.min().item()}, max: {valid_labels.max().item()}", flush=True)
                     # Check for NaN/Inf in valid labels
                     if torch.isnan(valid_labels.float()).any() or torch.isinf(valid_labels.float()).any():
-                        print(f"[DEBUG] {loss_type} - WARNING: NaN/Inf found in valid labels!", flush=True)
+                        print(f"[DEBUG] rank={rank} {loss_type} - WARNING: NaN/Inf found in valid labels!", flush=True)
             
             # Check lvr_tokens
             if 'lvr_tokens' in model_inputs:
                 lvr_tokens = model_inputs['lvr_tokens']
-                print(f"[DEBUG] {loss_type} - lvr_tokens type: {type(lvr_tokens)}, length: {len(lvr_tokens) if isinstance(lvr_tokens, list) else 'N/A'}", flush=True)
+                print(f"[DEBUG] rank={rank} {loss_type} - lvr_tokens type: {type(lvr_tokens)}, length: {len(lvr_tokens) if isinstance(lvr_tokens, list) else 'N/A'}", flush=True)
                 if isinstance(lvr_tokens, list) and len(lvr_tokens) > 0:
                     for i, lvr_token_group in enumerate(lvr_tokens):
                         if isinstance(lvr_token_group, torch.Tensor):
                             is_empty = lvr_token_group.numel() == 0
-                            print(f"[DEBUG] {loss_type} - lvr_tokens[{i}] shape: {lvr_token_group.shape}, dtype: {lvr_token_group.dtype}, "
+                            print(f"[DEBUG] rank={rank} {loss_type} - lvr_tokens[{i}] shape: {lvr_token_group.shape}, dtype: {lvr_token_group.dtype}, "
                                   f"numel: {lvr_token_group.numel()}, empty: {is_empty}", flush=True)
                             if is_empty:
-                                print(f"[DEBUG] {loss_type} - ❌ CRITICAL: Empty lvr_tokens[{i}]! This will cause NaN loss!", flush=True)
+                                print(f"[DEBUG] rank={rank} {loss_type} - ❌ CRITICAL: Empty lvr_tokens[{i}]! This will cause NaN loss!", flush=True)
                             else:
-                                print(f"[DEBUG] {loss_type} - lvr_tokens[{i}] min: {lvr_token_group.min().item()}, max: {lvr_token_group.max().item()}, "
+                                print(f"[DEBUG] rank={rank} {loss_type} - lvr_tokens[{i}] min: {lvr_token_group.min().item()}, max: {lvr_token_group.max().item()}, "
                                       f"values: {lvr_token_group.tolist()[:20]}", flush=True)
                         elif isinstance(lvr_token_group, list):
-                            print(f"[DEBUG] {loss_type} - lvr_tokens[{i}] type: list, length: {len(lvr_token_group)}, "
+                            print(f"[DEBUG] rank={rank} {loss_type} - lvr_tokens[{i}] type: list, length: {len(lvr_token_group)}, "
                                   f"empty: {len(lvr_token_group) == 0}, values: {lvr_token_group[:20]}", flush=True)
                             if len(lvr_token_group) == 0:
-                                print(f"[DEBUG] {loss_type} - ❌ CRITICAL: Empty lvr_tokens[{i}]! This will cause NaN loss!", flush=True)
+                                print(f"[DEBUG] rank={rank} {loss_type} - ❌ CRITICAL: Empty lvr_tokens[{i}]! This will cause NaN loss!", flush=True)
                         else:
-                            print(f"[DEBUG] {loss_type} - lvr_tokens[{i}] type: {type(lvr_token_group)}, value: {lvr_token_group}", flush=True)
+                            print(f"[DEBUG] rank={rank} {loss_type} - lvr_tokens[{i}] type: {type(lvr_token_group)}, value: {lvr_token_group}", flush=True)
                 else:
-                    print(f"[DEBUG] {loss_type} - WARNING: lvr_tokens is empty or not a list!", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} - WARNING: lvr_tokens is empty or not a list!", flush=True)
             
             # Check pixel_values
             if 'pixel_values' in model_inputs:
                 pixel_values = model_inputs['pixel_values']
-                print(f"[DEBUG] {loss_type} - pixel_values shape: {pixel_values.shape}, dtype: {pixel_values.dtype}", flush=True)
+                print(f"[DEBUG] rank={rank} {loss_type} - pixel_values shape: {pixel_values.shape}, dtype: {pixel_values.dtype}", flush=True)
                 if torch.isnan(pixel_values).any() or torch.isinf(pixel_values).any():
                     nan_count = torch.isnan(pixel_values).sum().item()
                     inf_count = torch.isinf(pixel_values).sum().item()
-                    print(f"[DEBUG] {loss_type} - WARNING: NaN/Inf in pixel_values: NaN={nan_count}, Inf={inf_count}", flush=True)
+                    print(f"[DEBUG] rank={rank} {loss_type} - WARNING: NaN/Inf in pixel_values: NaN={nan_count}, Inf={inf_count}", flush=True)
             
             # Check image_grid_thw
             if 'image_grid_thw' in model_inputs:
                 image_grid_thw = model_inputs['image_grid_thw']
-                print(f"[DEBUG] {loss_type} - image_grid_thw shape: {image_grid_thw.shape}, dtype: {image_grid_thw.dtype}", flush=True)
-                print(f"[DEBUG] {loss_type} - image_grid_thw values: {image_grid_thw[:3] if len(image_grid_thw) >= 3 else image_grid_thw}", flush=True)
+                print(f"[DEBUG] rank={rank} {loss_type} - image_grid_thw shape: {image_grid_thw.shape}, dtype: {image_grid_thw.dtype}", flush=True)
+                print(f"[DEBUG] rank={rank} {loss_type} - image_grid_thw values: {image_grid_thw[:3] if len(image_grid_thw) >= 3 else image_grid_thw}", flush=True)
         except Exception as e:
-            print(f"[DEBUG] Error logging detailed debug info: {e}", flush=True)
+            rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", 0))
+            print(f"[DEBUG] rank={rank} Error logging detailed debug info: {e}", flush=True)
             import traceback
             print(f"[DEBUG] Traceback: {traceback.format_exc()}", flush=True)
     
@@ -605,7 +698,10 @@ class QwenLVRSFTTrainer(Trainer):
         
         step_start_time = time.time()
         step = self.state.global_step
-    
+        try:
+            _rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", 0))
+        except Exception:
+            _rank = int(os.environ.get("RANK", 0))
         
         # Call parent training_step which handles forward, backward, and optimizer step
         try:
@@ -614,7 +710,7 @@ class QwenLVRSFTTrainer(Trainer):
             # Check for NaN loss after training step
             if isinstance(loss, torch.Tensor):
                 if torch.isnan(loss) or torch.isinf(loss):
-                    print(f"[TRAIN.training_step] WARNING | step={step} | "
+                    print(f"[TRAIN.training_step] WARNING | rank={_rank} step={step} | "
                           f"Loss is NaN/Inf after training_step: {loss.item()}, will continue with next step", flush=True)
                     # Use nan_to_num to preserve computation graph if possible, otherwise create connected zero loss
                     try:
@@ -625,13 +721,14 @@ class QwenLVRSFTTrainer(Trainer):
                         loss = torch.tensor(0.0, device=model_param.device, dtype=model_param.dtype) * model_param.sum() * 0.0
             elif isinstance(loss, (float, int)):
                 if not (isinstance(loss, (int, float)) and (loss == loss)):  # Check for NaN
-                    print(f"[TRAIN.training_step] WARNING | step={step} | "
+                    print(f"[TRAIN.training_step] WARNING | rank={_rank} step={step} | "
                           f"Loss is NaN after training_step: {loss}, will continue with next step", flush=True)
                     loss = 0.0
         except RuntimeError as e:
             error_str = str(e).lower()
+            rank = _rank
             if "nan" in error_str or "inf" in error_str or "nccl" in error_str:
-                print(f"[TRAIN.training_step] WARNING | step={step} | "
+                print(f"[TRAIN.training_step] WARNING | rank={_rank} step={step} | "
                       f"RuntimeError with NaN/Inf/NCCL: {e}, will continue with next step", flush=True)
                 # Create a zero loss connected to model to ensure proper gradient flow
                 try:
@@ -659,9 +756,8 @@ class QwenLVRSFTTrainer(Trainer):
                 if param.grad is not None:
                     # Check for NaN/Inf gradients
                     if torch.isnan(param.grad).any() or torch.isinf(param.grad).any():
-                        # Print debug information about the problematic data
                         self._log_debug_info(inputs, "gradient")
-                        print(f"[TRAIN] WARNING | step={step} | NaN/Inf detected in LVR head gradients (param shape: {param.shape}), zeroing out gradient", flush=True)
+                        print(f"[TRAIN] WARNING | rank={_rank} step={step} | NaN/Inf detected in LVR head gradients (param shape: {param.shape}), zeroing out gradient", flush=True)
                         nan_grad_found = True
                         # Zero out the gradient to prevent propagation
                         param.grad.zero_()
@@ -669,7 +765,7 @@ class QwenLVRSFTTrainer(Trainer):
         # If NaN gradient found, we've already zeroed it out, so we can continue
         # The loss is already computed and optimizer step has been taken, so we just log and continue
         if nan_grad_found:
-            print(f"[TRAIN] INFO | step={step} | NaN gradients detected and zeroed, continuing to next step", flush=True)
+            print(f"[TRAIN] INFO | rank={_rank} step={step} | NaN gradients detected and zeroed, continuing to next step", flush=True)
         
         # Log gradient statistics (if no NaN)
         grad_stats = {}
@@ -694,7 +790,7 @@ class QwenLVRSFTTrainer(Trainer):
         
         # Log gradient statistics (main focus)
         if grad_stats:
-            print(f"[TRAIN] step={step} | loss={loss.item() if isinstance(loss, torch.Tensor) else loss:.6f} | "
+            print(f"[TRAIN] rank={_rank} step={step} | loss={loss.item() if isinstance(loss, torch.Tensor) else loss:.6f} | "
                   f"grad_norm_mean={grad_stats.get('lvr_grad_norm_mean', 0):.6f} | "
                   f"grad_norm_max={grad_stats.get('lvr_grad_norm_max', 0):.6f}", flush=True)
         

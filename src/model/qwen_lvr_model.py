@@ -53,7 +53,7 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 
 
-from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity
+from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity, LVRBboxMLP, BoxFeatureResampler, DiTReconstructionHead
 
 class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
@@ -67,8 +67,80 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         if config.latent_end_token:
             self._init_lvr_latent_end_emb()
         
+        # Initialize bbox MLP if using fixed N LVR tokens
+        if getattr(config, 'use_fixed_num_lvr_tokens', False):
+            fixed_num_lvr_tokens = getattr(config, 'fixed_num_lvr_tokens', 16)
+            self._init_lvr_bbox_mlp(fixed_num_lvr_tokens)
+        # Initialize BoxFeatureResampler for fixed 8 latent MSE target
+        if getattr(config, 'use_box_feature_resampler', False):
+            num_latent_tokens = getattr(config, 'num_latent_tokens', 8)
+            self._init_box_feature_resampler(num_latent_tokens)
+        # Initialize DiT pixel reconstruction head
+        if getattr(config, 'use_dit_reconstruction', False):
+            dit_pretrained_path = getattr(config, 'dit_pretrained_path', None)
+            self._init_dit_reconstruction_head(dit_pretrained_path=dit_pretrained_path)
+
+    def get_image_features(self, pixel_values, grid_thw):
+        """
+        Get image features from pixel values.
+        
+        This method is added to ensure compatibility regardless of transformers version.
+        It processes images through the visual encoder and returns split features.
+        
+        Args:
+            pixel_values: Tensor of pixel values
+            grid_thw: Tensor of grid dimensions [T, H, W] for each image
+            
+        Returns:
+            List of image feature tensors, one per image
+        """
+        # Process through visual encoder
+        hidden_states = self.visual(pixel_values, grid_thw=grid_thw)
+        # Split by grid sizes (H * W // 4 tokens per image after spatial merge)
+        split_sizes = (grid_thw[:, 1] * grid_thw[:, 2] // 4).tolist()
+        return hidden_states.split(split_sizes, dim=0)
+
+    def _init_box_feature_resampler(self, num_latent_tokens: int = 8):
+        """Initialize BoxFeatureResampler for fixed num_latent_tokens per bbox (target for MSE, output detached).
+        Bbox features fed to the resampler come from image_embeds (post-merger), so they are already hidden_size;
+        use vision_dim=hidden_size so no projection is applied (vision_proj=None)."""
+        vision_dim = self.config.hidden_size
+        self.box_feature_resampler = BoxFeatureResampler(
+            hidden_size=self.config.hidden_size,
+            num_queries=num_latent_tokens,
+            vision_dim=vision_dim,
+        )
+        self.config.num_latent_tokens = num_latent_tokens
+
+    def _init_dit_reconstruction_head(self, dit_pretrained_path: Optional[str] = None):
+        """Initialize DiTReconstructionHead for pixel reconstruction conditioned on LLM 8 tokens."""
+        llm_hidden_size = self.config.hidden_size
+        dit_hidden_size = getattr(self.config, 'dit_hidden_size', 1152)  # DiT-XL-2 default
+        vae_repo = getattr(self.config, 'dit_vae_repo', 'stabilityai/sd-vae-ft-mse')
+        dit_crop_size = getattr(self.config, 'dit_crop_size', 128)
+        self.dit_recon_head = DiTReconstructionHead(
+            llm_hidden_size=llm_hidden_size,
+            dit_hidden_size=dit_hidden_size,
+            vae_repo=vae_repo,
+            dit_pretrained_path=dit_pretrained_path,
+            crop_size=dit_crop_size,
+        )
+        self.config.dit_num_latent_tokens = getattr(self.config, 'dit_num_latent_tokens', 8)
+
+    def _init_lvr_bbox_mlp(self, fixed_num_lvr_tokens: int = 16):
+        """
+        Initialize MLP module to map bbox image token features to N fixed vectors.
+        
+        Args:
+            fixed_num_lvr_tokens: Number of fixed LVR tokens (default: 16)
+        """
+        self.lvr_bbox_mlp = LVRBboxMLP(
+            hidden_size=self.config.hidden_size,
+            fixed_num_lvr_tokens=fixed_num_lvr_tokens
+        )
+        self.config.fixed_num_lvr_tokens = fixed_num_lvr_tokens
+    
     def _init_lvr_head(self, lvr_head_type, mlp_ratio: float = 1.0, use_flash_attention: bool = False):
-        print(f"Detected LVR Head Type: '{lvr_head_type}'")
         if lvr_head_type == 'simple':
             self.lvr_head = LVRHead(hidden_size=self.config.hidden_size)
         elif lvr_head_type == 'glu':
@@ -81,7 +153,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             #   mlp_ratio=1.0: hidden_size -> hidden_size (minimal params, ~25.7M)
             #   mlp_ratio=0.5: hidden_size -> hidden_size/2 (fewer params, ~25.6M)
             #   mlp_ratio=0.25: hidden_size -> hidden_size/4 (even fewer params, ~12.8M)
-            print(f"Using Attention-based LVR Head with mlp_ratio={mlp_ratio}, use_flash_attention={use_flash_attention}")
             self.lvr_head = LVRHeadAttention(
                 hidden_size=self.config.hidden_size,
                 query_dim=None,  # Not used, kept for compatibility
@@ -106,8 +177,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             use_output_norm = getattr(self.config, 'ivr_use_output_norm', True)
             temperature = getattr(self.config, 'ivr_temperature', 1.0)
             
-            print(f"Using Implicit Visual Routing (IVR) LVR Head with iterations={iterations}, "
-                  f"chunk_size={chunk_size}, use_output_norm={use_output_norm}, temperature={temperature}")
             self.lvr_head = LVRHeadImplicitVisualRouting(
                 hidden_size=self.config.hidden_size,
                 iterations=iterations,
@@ -129,8 +198,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             chunk_size = getattr(self.config, 'gfr_chunk_size', None)  # None means auto-select
             use_output_norm = getattr(self.config, 'gfr_use_output_norm', True)
             
-            print(f"Using Gated Feature Reweighting (GFR) LVR Head with visual_dim={visual_dim}, "
-                  f"chunk_size={chunk_size}, use_output_norm={use_output_norm}")
             self.lvr_head = LVRHeadGatedFocus(
                 hidden_size=self.config.hidden_size,
                 visual_dim=visual_dim,
@@ -149,8 +216,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             chunk_size = getattr(self.config, 'isg_chunk_size', None)  # None means auto-select
             use_output_norm = getattr(self.config, 'isg_use_output_norm', True)
             
-            print(f"Using Intrinsic Similarity Gating (ISG) LVR Head with "
-                  f"chunk_size={chunk_size}, use_output_norm={use_output_norm}")
             self.lvr_head = LVRHeadIntrinsicSimilarity(
                 hidden_size=self.config.hidden_size,
                 use_output_norm=use_output_norm,
@@ -163,8 +228,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         self.config.lvr_head_type = lvr_head_type
         
     def _init_lvr_latent_end_emb(self):
-
-        print(f"Activated Learnable latent end token of LVR")
         # Initializing the learnable latentend
         # 2X norm to distinguish this from the normal semantic space
         target_norm_scale_latentend = 1
@@ -203,6 +266,12 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         """
             Patching the generation function for LVR
         """
+        # Reset DiT generation buffers at the start of each new generate() call
+        # This prevents cross-sample buffer pollution in evaluation
+        if hasattr(self, '_dit_lvr_hidden_buffer'):
+            self._dit_lvr_hidden_buffer = {}
+        if hasattr(self, '_dit_lvr_step_counter'):
+            self._dit_lvr_step_counter = {}
 
         # Params in 
         if decoding_strategy is None and hasattr(generation_config,'decoding_strategy'):
@@ -515,7 +584,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             # again Transformer version issue
             model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
-            model_forward = self.__call__
+            model_forward = self.forward
             if isinstance(model_kwargs.get("past_key_values"), Cache):
                 is_compileable = model_kwargs["past_key_values"].is_compileable and self._supports_static_cache
                 if getattr(self, "hf_quantizer", None) is not None:
@@ -742,7 +811,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             model_kwargs = self._get_initial_cache_position(cur_len, input_ids.device, model_kwargs)
             # model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
-            model_forward = self.__call__
+            model_forward = self.forward
             if isinstance(model_kwargs.get("past_key_values"), Cache):
                 is_compileable = model_kwargs["past_key_values"].is_compileable and self._supports_static_cache
                 if getattr(self, "hf_quantizer", None) is not None:
@@ -1012,12 +1081,14 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         except:
             model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
 
-        model_forward = self.__call__
+        model_forward = self.forward
+        
         if isinstance(model_kwargs.get("past_key_values"), Cache):
             is_compileable = model_kwargs["past_key_values"].is_compileable and self._supports_static_cache
             if getattr(self, "hf_quantizer", None) is not None:
                 is_compileable &= self.hf_quantizer.is_compileable
             is_compileable = is_compileable and not generation_config.disable_compile
+            
             if is_compileable and (
                 self.device.type == "cuda" or generation_config.compile_config._compile_all_devices
             ):

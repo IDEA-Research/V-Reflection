@@ -82,6 +82,26 @@ def configure_lvr_head(model, training_args):
     if hasattr(model, 'lvr_latent_end_emb') and model.lvr_latent_end_emb is not None:
         model.lvr_latent_end_emb.requires_grad = True
         rank0_print(f"[INFO] LVR latent end token set to trainable")
+    
+    # Configure learnable latent embeddings for attention isolation
+    if hasattr(model, 'lvr_latent_embeds') and model.lvr_latent_embeds is not None:
+        model.lvr_latent_embeds.requires_grad = True
+        total_params = model.lvr_latent_embeds.numel()
+        rank0_print(f"[INFO] Learnable latent embeddings set to trainable (total params: {total_params}, shape: {model.lvr_latent_embeds.shape})")
+    
+    # Configure BoxFeatureResampler (joint training with LLM)
+    if hasattr(model, 'box_feature_resampler') and model.box_feature_resampler is not None:
+        resampler_params = list(model.box_feature_resampler.parameters())
+        set_requires_grad(resampler_params, True)  # Resampler is trainable
+        total_params = sum(p.numel() for p in resampler_params if p.requires_grad)
+        rank0_print(f"[INFO] BoxFeatureResampler parameters set to trainable (total params: {total_params})")
+
+    # Configure DiT reconstruction head (trainable; VAE inside is frozen)
+    if hasattr(model, 'dit_recon_head') and model.dit_recon_head is not None:
+        dit_params = [p for p in model.dit_recon_head.parameters() if p.requires_grad]
+        set_requires_grad(dit_params, True)
+        total_params = sum(p.numel() for p in model.dit_recon_head.parameters() if p.requires_grad)
+        rank0_print(f"[INFO] DiT reconstruction head parameters set to trainable (total params: {total_params})")
 
 
 def train():
@@ -204,14 +224,33 @@ def train():
         config.gfr_use_output_norm = getattr(model_args, 'gfr_use_output_norm', True)
         rank0_print(f"[INFO] GFR config: visual_dim={config.gfr_visual_dim}, "
                    f"chunk_size={config.gfr_chunk_size}, use_output_norm={config.gfr_use_output_norm}")
-    
+
+    # BoxFeatureResampler: fixed num latent tokens per bbox for MSE target
+    config.use_box_feature_resampler = getattr(model_args, 'use_box_feature_resampler', False)
+    config.num_latent_tokens = getattr(model_args, 'num_latent_tokens', 8)
+    if config.use_box_feature_resampler:
+        rank0_print(f"[INFO] BoxFeatureResampler enabled with num_latent_tokens={config.num_latent_tokens}")
+
+    # DiT pixel reconstruction head
+    config.use_dit_reconstruction = getattr(model_args, 'use_dit_reconstruction', False)
+    config.dit_pretrained_path = getattr(model_args, 'dit_pretrained_path', None)
+    config.dit_vae_repo = getattr(model_args, 'dit_vae_repo', 'stabilityai/sd-vae-ft-mse')
+    config.dit_hidden_size = getattr(model_args, 'dit_hidden_size', 384)
+    config.dit_num_latent_tokens = getattr(model_args, 'dit_num_latent_tokens', 8)
+    config.dit_condition_gt_prob = getattr(training_args, 'dit_condition_gt_prob', 0.5)
+    config.dit_crop_size = getattr(data_args, 'dit_crop_size', 128)
+    if config.use_dit_reconstruction:
+        rank0_print(f"[INFO] DiT reconstruction enabled: dit_pretrained_path={config.dit_pretrained_path}, dit_num_latent_tokens={config.dit_num_latent_tokens}, dit_condition_gt_prob={config.dit_condition_gt_prob}, dit_crop_size={config.dit_crop_size}")
+
     # Load model based on model type
     if "Qwen2.5" in model_args.model_id:
         # Patch the forward function
         replace_qwen2_5_with_mixed_modality_forward_lvr(coconut=model_args.coconut,
                                                         lvr_head=model_args.lvr_head,
                                                         mode_switch_loss=training_args.mode_switch_loss,
-                                                        latent_end_token=model_args.latent_end_token)
+                                                        latent_end_token=model_args.latent_end_token,
+                                                        use_box_feature_resampler=getattr(model_args, 'use_box_feature_resampler', False),
+                                                        use_dit_reconstruction=getattr(model_args, 'use_dit_reconstruction', False))
         
         model = QwenWithLVR.from_pretrained(
             model_pth,
@@ -244,7 +283,8 @@ def train():
         # init latent_end_token
         if model_args.latent_end_token:
             model._init_lvr_latent_end_emb()
-            model.config.loss_mode_switch_fct = training_args.loss_mode_switch_fct
+        # Always set loss_mode_switch_fct (forward uses getattr with default, but explicit is safer)
+        model.config.loss_mode_switch_fct = training_args.loss_mode_switch_fct
 
         
         ''' Patch the patch-emb with fp32; Avoid edge-case nermical stability issue '''
@@ -258,9 +298,9 @@ def train():
     configure_llm(model_to_configure, training_args)
     configure_vision_tower(model_to_configure, training_args, compute_dtype, training_args.device)
     
-    # Configure LVR head
-    if model_args.lvr_head:
-        configure_lvr_head(model, training_args)  # Ensure LVR head is trainable
+    # Configure LVR head and/or BoxFeatureResampler and/or DiT reconstruction head
+    if model_args.lvr_head or getattr(model_args, 'use_box_feature_resampler', False) or getattr(model_args, 'use_dit_reconstruction', False):
+        configure_lvr_head(model, training_args)  # Ensure LVR head / resampler / dit_recon_head is trainable
 
     ''' NaN sanitizer: Hook the patch-emb with torch.nan_to_num() '''
     # def output_nan_sanitizer_hook(module, input, output):
@@ -300,6 +340,8 @@ def train():
 
     # configure lvr loss type
     model.config.loss_lvr_fct = training_args.loss_lvr_fct
+    # configure loss control flags
+    model.config.use_mse_loss = training_args.use_mse_loss
 
 
     '''
@@ -317,11 +359,15 @@ def train():
                                                                                             training_args=training_args,
                                                                                             latent_end_token=model_args.latent_end_token)
         else:
-            data_module, total_data_len = make_packed_supervised_data_module_lvr(model_id=model_args.model_id,
-                                                                                processor=processor,
-                                                                                data_args=data_args,
-                                                                                training_args=training_args,
-                                                                                latent_end_token=model_args.latent_end_token)
+            fixed_num = (model_args.num_latent_tokens if getattr(model_args, 'use_box_feature_resampler', False) else getattr(data_args, 'fixed_num_of_lvr_tokens', None))
+            data_module, total_data_len = make_packed_supervised_data_module_lvr(
+                model_id=model_args.model_id,
+                processor=processor,
+                data_args=data_args,
+                training_args=training_args,
+                latent_end_token=model_args.latent_end_token,
+                fixed_num_of_lvr_tokens=fixed_num,
+            )
         if not training_args.max_steps:
             training_args.max_steps = total_data_len // (training_args.gradient_accumulation_steps 
                                                          * training_args.world_size
@@ -355,7 +401,9 @@ def train():
     signal.signal(signal.SIGINT, signal_handler)
     
     try:
-        trainer.train()
+        # If resume_from_checkpoint is provided via TrainingArguments (e.g. from CLI),
+        # explicitly pass it to the Trainer so that optimizer/scheduler/global_step are restored.
+        trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
     except KeyboardInterrupt:
         rank0_print("\n[ERROR] Training interrupted by user")
         traceback.print_exc()

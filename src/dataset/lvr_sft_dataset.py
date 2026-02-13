@@ -1,5 +1,6 @@
 import copy
 import os
+import logging
 from typing import Dict
 import torch
 import transformers
@@ -7,6 +8,8 @@ import ujson as json
 from torch.utils.data import Dataset
 
 from src.params import DataArguments
+
+logger = logging.getLogger(__name__)
 from src.constants import (
     IGNORE_INDEX,
     DEFAULT_IM_START_TOKEN,
@@ -156,6 +159,11 @@ class SupervisedDatasetLVR(Dataset):
                     THE BBOXES ARE SUPPOSED TO BE NORMALIZED
 
                 '''
+                # CRITICAL FIX: Handle nested bbox format [[x0, y0, x1, y1]] from viscot_2 dataset
+                # Flatten nested lists recursively until we get a flat list of 4 values
+                while isinstance(bbox, (list, tuple)) and len(bbox) == 1 and isinstance(bbox[0], (list, tuple)):
+                    bbox = bbox[0]
+                
                 patch_size = self.processor.image_processor.patch_size
                 image_width = img.width
                 image_height = img.height
@@ -220,8 +228,25 @@ class SupervisedDatasetLVR(Dataset):
             image_files = sources["image"]
             image_folder = self.data_args.image_folder
 
+            # Normalize image_files to a flat list of strings
             if isinstance(image_files, str):
                 image_files = [image_files]
+            elif isinstance(image_files, list):
+                # Flatten nested lists if any
+                flattened = []
+                for item in image_files:
+                    if isinstance(item, str):
+                        flattened.append(item)
+                    elif isinstance(item, list):
+                        # Handle nested lists
+                        flattened.extend([x for x in item if isinstance(x, str)])
+                    else:
+                        # Skip non-string items
+                        logger.warning(f"Skipping non-string image item: {type(item)}")
+                image_files = flattened
+            else:
+                logger.warning(f"Unexpected image_files type: {type(image_files)}, converting to list")
+                image_files = [str(image_files)] if image_files is not None else []
 
             images = []
             
@@ -229,6 +254,10 @@ class SupervisedDatasetLVR(Dataset):
             dataset_name = sources.get('dataset', None)
             
             for image_file in image_files:
+                # Ensure image_file is a string (defensive check)
+                if not isinstance(image_file, str):
+                    logger.warning(f"Skipping non-string image_file: {type(image_file)}")
+                    continue
                 # Map image path using dataset-specific mapping
                 mapped_path = map_image_path(image_file, image_folder, dataset_name)
                 images.append(get_image_info(mapped_path, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))

@@ -10,6 +10,9 @@ import torch.distributed as dist
 
 import torch.nn.functional as F
 
+# Import helper function for preparing batched image embeddings
+from src.train.monkey_patch_forward_lvr import _prepare_batched_image_embeds
+
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():
@@ -142,6 +145,10 @@ def qwen2_5_mixed_modality_forward_lvr_grpo(
         inputs_embeds = torch.cat([inputs_embeds[:, :prompt_length, :], comp_embeds], dim=1)
     
             
+    # Store image_embeds and total_tokens for LVR head processing
+    stored_image_embeds = None
+    total_tokens = None
+    
     if pixel_values is not None:
 
         # newer Transformers
@@ -178,6 +185,10 @@ def qwen2_5_mixed_modality_forward_lvr_grpo(
             )
         image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
         inputs_embeds = inputs_embeds.masked_scatter(image_mask_unsqueeze, image_embeds)
+        
+        # Store image_embeds and compute total_tokens for LVR head processing
+        stored_image_embeds = image_embeds
+        total_tokens = torch.sum(image_mask, dim=1)  # (batch_size,)
             
 
     if attention_mask is not None:
@@ -219,7 +230,43 @@ def qwen2_5_mixed_modality_forward_lvr_grpo(
     if self.config.lvr_head:
         '''apply lvr_head in _inference mode'''
         if lvr_mode_switch is not None:
-            outputs.last_hidden_state[lvr_mode_switch,:,:] = self.lvr_head(outputs.last_hidden_state[lvr_mode_switch,:,:])
+            # Check if this is an intrinsic-similarity head that requires image_embeds
+            requires_image_embeds = (self.config.lvr_head_type == 'intrinsic-similarity' or self.config.lvr_head_type == 'isg')
+            
+            if requires_image_embeds and stored_image_embeds is not None and total_tokens is not None:
+                # Get batch indices that are in LVR mode
+                lvr_batch_indices = torch.nonzero(lvr_mode_switch, as_tuple=True)[0]
+                
+                if len(lvr_batch_indices) > 0:
+                    # Get model dtype to avoid unnecessary dtype conversions
+                    model_dtype = next(self.lvr_head.parameters()).dtype if len(list(self.lvr_head.parameters())) > 0 else outputs.last_hidden_state.dtype
+                    
+                    # Get hidden states for LVR batch items (last position)
+                    batched_hidden_states = outputs.last_hidden_state[lvr_batch_indices, -1].to(model_dtype)  # (num_lvr_items, hidden_size)
+                    
+                    # Prepare batched image embeddings
+                    batched_image_embeds, image_attention_mask = _prepare_batched_image_embeds(
+                        stored_image_embeds, total_tokens, lvr_batch_indices, target_dtype=model_dtype
+                    )
+                    
+                    # Apply LVR head with both hidden_state and image_embeds
+                    v_focal_batch = self.lvr_head(batched_hidden_states, batched_image_embeds, image_attention_mask)  # (num_lvr_items, hidden_size)
+                    
+                    # Update outputs with the focused features
+                    outputs.last_hidden_state[lvr_batch_indices, -1] = v_focal_batch.to(outputs.last_hidden_state.dtype)
+                    
+                    # Free memory
+                    del batched_hidden_states, batched_image_embeds, image_attention_mask, v_focal_batch
+                else:
+                    # No items in LVR mode, skip processing
+                    pass
+            elif requires_image_embeds:
+                # Intrinsic-similarity head requires image_embeds but they're not available
+                # Skip LVR processing - use original hidden states
+                pass
+            else:
+                # For other head types that don't require image_embeds, use original behavior
+                outputs.last_hidden_state[lvr_mode_switch,:,:] = self.lvr_head(outputs.last_hidden_state[lvr_mode_switch,:,:])
 
     hidden_states = outputs[0]
     last_position_hidden_state = outputs.last_hidden_state[:,-1,:]

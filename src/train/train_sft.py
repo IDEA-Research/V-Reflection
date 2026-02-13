@@ -6,7 +6,7 @@ import torch
 from transformers import AutoProcessor, AutoConfig, HfArgumentParser
 from transformers import AutoTokenizer, AutoModel
 
-from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
+from transformers import AutoProcessor, Qwen2VLForConditionalGeneration, HfArgumentParser, Qwen2_5_VLForConditionalGeneration
 
 from src.trainer import QwenSFTTrainer
 from src.dataset import make_supervised_data_module

@@ -6,13 +6,13 @@
 #SBATCH --gres=gpu:hgx:8 # A800 - Use 8 GPUs for parallel evaluation
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/evaluation_7b_SFT_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/evaluation_7b_SFT_steps8_%j.txt
 
 # ============================================================================
 # Configuration - Model Settings
 # ============================================================================
 # Base checkpoint directory - can be overridden via environment variable
-BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/stage1_checkpoints_7b_intrinsic-similarity/Stage1_ISG_steps2100_b1_mseLVR0.1-MaxVisToken5120-MinVisToken128}"
+BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/no_head/SFT_steps2500_b4_mseLVR0.1_acc8_MSETrue_resample}"
 
 # Auto-detect all checkpoint directories
 # If CHECKPOINT_STEPS is not set, automatically find all checkpoints
@@ -37,7 +37,7 @@ else
 fi
 
 # Evaluation step list
-EVAL_STEP_LIST="4"
+EVAL_STEP_LIST="8"
 
 # Dataset configuration for training
 # Options: "default" (viscot_sroie_dude) or "viscot_full" (Visual_cot full dataset)
@@ -46,6 +46,13 @@ DATASET_CONFIG="${DATASET_CONFIG:-default}"  # Default: default
 # Available dataset configurations:
 # - "default": Uses meta_data_lvr_sft_stage1.json (viscot_sroie_dude_lvr_formatted.json)
 # - "viscot_full": Uses meta_data_lvr_sft_stage1_viscot_full.json (viscot_363k_lvr_formatted.json with coco/openimages)
+
+# Activation map visualization control
+# Set to "1" to enable saving activation maps for LVR heads (gated-focus, intrinsic-similarity)
+# Activation maps will be saved to: evaluation/results/{benchmark}/decoding_by_{strategy}/{run_name}/{checkpoint_num}/activation_maps/
+# Default: "0" (disabled) - Set to "1" to enable visualization
+LVR_SAVE_ACTIVATION_MAPS="${LVR_SAVE_ACTIVATION_MAPS:-0}"  # Default: 0 (disabled)
+
 # ============================================================================
 
 # Initialize conda if available
@@ -179,6 +186,7 @@ run_evaluation() {
     echo "Dataset Configuration: $DATASET_CONFIG"
     echo "Checkpoint Path: $checkpoint_path"
     echo "Evaluation Steps: $EVAL_STEP_LIST"
+    echo "Activation Map Visualization: $([ "$LVR_SAVE_ACTIVATION_MAPS" = "1" ] && echo "Enabled" || echo "Disabled")"
     
     # Check if checkpoint exists
     if [ ! -d "$checkpoint_path" ]; then
@@ -239,6 +247,7 @@ run_evaluation() {
     export EVAL_CHECKPOINT_PATH="$checkpoint_path"
     export EVAL_STEP_LIST="$EVAL_STEP_LIST"
     export DATASET_CONFIG="$DATASET_CONFIG"
+    export LVR_SAVE_ACTIVATION_MAPS="$LVR_SAVE_ACTIVATION_MAPS"
     # Use evaluation_7b.sh which supports multi-GPU parallel processing
     bash "${PROJECT_ROOT}/scripts/evaluation/evaluation_7b.sh" "$@"
     local eval_exit_code=$?
@@ -250,17 +259,72 @@ run_evaluation() {
     
     echo ""
     echo "============================================================================"
-    echo "Evaluation completed for checkpoint-${checkpoint_step}. Calculating accuracy by category..."
+    echo "Evaluation completed for checkpoint-${checkpoint_step}. Merging process results..."
     echo "============================================================================"
     
     # Generate run_name from checkpoint path
-    # evaluation.py generates run_name from full checkpoint path using: '_'.join(chkpt_pth.split('/')[0:])
-    # For absolute paths starting with '/', this creates a leading underscore: _comp_robot_zhoujiazhou_...
-    # Format: _comp_robot_zhoujiazhou_projects_Active-Coconut_result_..._checkpoint-XXX
-    local run_name=$(echo "$checkpoint_path" | sed 's|/|_|g')
+    # evaluation.py now removes /comp_robot/zhoujiazhou/projects/Active-Coconut/result from path
+    # Format: no_head/SFT_steps2500_b1_mseLVR0.1_acc8_ce_v2
+    local result_prefix="/comp_robot/zhoujiazhou/projects/Active-Coconut/result"
+    local run_name=""
+    if [[ "$checkpoint_path" == "$result_prefix"* ]]; then
+        # Remove result prefix and leading slash
+        local relative_path="${checkpoint_path#$result_prefix/}"
+        # Remove checkpoint directory name (e.g., checkpoint-300) from path
+        run_name=$(dirname "$relative_path")
+    else
+        # Fallback: use old format
+        run_name=$(echo "$checkpoint_path" | sed 's|/|_|g')
+    fi
+    
+    # Extract checkpoint number (e.g., "300" from "checkpoint-300")
+    local checkpoint_num=$(basename "$checkpoint_path" | sed 's/checkpoint-//')
+    
+    # Merge process results for all datasets
+    MERGE_SCRIPT="${PROJECT_ROOT}/evaluation/merge_process_results.py"
+    if [ -f "$MERGE_SCRIPT" ]; then
+        # Parse EVAL_STEP_LIST (comma-separated)
+        IFS=',' read -ra STEP_ARRAY <<< "$EVAL_STEP_LIST"
+        
+        for step in "${STEP_ARRAY[@]}"; do
+            step=$(echo "$step" | xargs)  # Trim whitespace
+            
+            # Merge BLINK results
+            blink_result_dir="${PROJECT_ROOT}/evaluation/results/blink/decoding_by_steps/${run_name}"
+            if [ -d "$blink_result_dir" ]; then
+                echo ""
+                echo "Merging BLINK process results for checkpoint-${checkpoint_step}, step ${step}..."
+                python "$MERGE_SCRIPT" "$blink_result_dir" "blink" "$checkpoint_num" "$step" || true
+            fi
+            
+            # Merge VSTAR_BENCH results
+            vstar_result_dir="${PROJECT_ROOT}/evaluation/results/vstar_bench/decoding_by_steps/${run_name}"
+            if [ -d "$vstar_result_dir" ]; then
+                echo ""
+                echo "Merging VSTAR_BENCH process results for checkpoint-${checkpoint_step}, step ${step}..."
+                python "$MERGE_SCRIPT" "$vstar_result_dir" "vstar_bench" "$checkpoint_num" "$step" || true
+            fi
+            
+            # Merge MMVP results
+            mmvp_result_dir="${PROJECT_ROOT}/evaluation/results/MMVP/decoding_by_steps/${run_name}"
+            if [ -d "$mmvp_result_dir" ]; then
+                echo ""
+                echo "Merging MMVP process results for checkpoint-${checkpoint_step}, step ${step}..."
+                python "$MERGE_SCRIPT" "$mmvp_result_dir" "MMVP" "$checkpoint_num" "$step" || true
+            fi
+        done
+    else
+        echo "Warning: Merge script not found at $MERGE_SCRIPT, skipping merge step"
+    fi
+    
+    echo ""
+    echo "============================================================================"
+    echo "Merging completed. Calculating accuracy by category..."
+    echo "============================================================================"
     
     # Calculate accuracy for blink dataset
-    local blink_json_path="${PROJECT_ROOT}/evaluation/results/blink/decoding_by_steps/${run_name}/steps004.json"
+    # New format: ck-{checkpoint_num}-step{step_num}.json
+    local blink_json_path="${PROJECT_ROOT}/evaluation/results/blink/decoding_by_steps/${run_name}/ck-${checkpoint_num}-step4.json"
     if [ -f "$blink_json_path" ]; then
         echo ""
         echo "Calculating accuracy for BLINK dataset (checkpoint-${checkpoint_step})..."
@@ -274,7 +338,8 @@ run_evaluation() {
     fi
     
     # Calculate accuracy for vstar_bench dataset
-    local vstar_json_path="${PROJECT_ROOT}/evaluation/results/vstar_bench/decoding_by_steps/${run_name}/steps004.json"
+    # New format: ck-{checkpoint_num}-step{step_num}.json
+    local vstar_json_path="${PROJECT_ROOT}/evaluation/results/vstar_bench/decoding_by_steps/${run_name}/ck-${checkpoint_num}-step4.json"
     if [ -f "$vstar_json_path" ]; then
         echo ""
         echo "Calculating accuracy for VSTAR_BENCH dataset (checkpoint-${checkpoint_step})..."
@@ -288,7 +353,8 @@ run_evaluation() {
     fi
     
     # Calculate accuracy for MMVP dataset
-    local mmvp_json_path="${PROJECT_ROOT}/evaluation/results/MMVP/decoding_by_steps/${run_name}/steps004.json"
+    # New format: ck-{checkpoint_num}-step{step_num}.json
+    local mmvp_json_path="${PROJECT_ROOT}/evaluation/results/MMVP/decoding_by_steps/${run_name}/ck-${checkpoint_num}-step4.json"
     if [ -f "$mmvp_json_path" ]; then
         echo ""
         echo "Calculating accuracy for MMVP dataset (checkpoint-${checkpoint_step})..."
@@ -317,6 +383,7 @@ echo "Base Checkpoint Directory: $BASE_CHECKPOINT_DIR"
 echo "Checkpoints to evaluate: ${CHECKPOINT_STEPS[@]}"
 echo "Evaluation Steps: $EVAL_STEP_LIST"
 echo "Dataset Configuration: $DATASET_CONFIG"
+echo "Activation Map Visualization: $([ "$LVR_SAVE_ACTIVATION_MAPS" = "1" ] && echo "Enabled" || echo "Disabled")"
 echo "============================================================================"
 
 # Track results

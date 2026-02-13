@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:hgx:8 # A800
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_attention-mask_b1_acc8_8GPU_lvr0.1_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_b1_acc8_8GPU_ce+mse_lvr0.1_intrinsic-similarity_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
@@ -21,7 +21,6 @@ NUM_DEVICES=$(echo "$GPU_IDS" | tr ',' '\n' | wc -l)
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # NCCL 优化配置
-export NCCL_TIMEOUT=300  # 30 分钟超时（默认是 10 分钟）
 export NCCL_IB_DISABLE=0  # 启用 InfiniBand（如果可用）
 export NCCL_DEBUG=WARN  # 设置为 WARN 以减少日志输出（调试时可设为 INFO）
 
@@ -41,25 +40,30 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
     echo "data/meta_data_lvr_sft_stage1_viscot_full.json" || \
     echo "data/meta_data_lvr_sft_stage1.json")
 
-MAX_STEPS=2100
+MAX_STEPS=2500
 LR=1e-5
 LVR_HEAD=True
-LVR_HEAD_TYPE="attention-mask"  # Options: simple, glu, attention-mask, ivr, intrinsic-similarity, isg
+LVR_HEAD_TYPE="intrinsic-similarity"  # Options: simple, glu, attention-mask, ivr, intrinsic-similarity, isg
 
-# IVR (Implicit Visual Routing) 参数
-IVR_ITERATIONS="${IVR_ITERATIONS:-3}"  # 路由迭代次数，默认3
-IVR_CHUNK_SIZE="${IVR_CHUNK_SIZE:-}"  # Chunk大小，默认None（自动选择）
-IVR_USE_OUTPUT_NORM="${IVR_USE_OUTPUT_NORM:-True}"  # 是否使用输出归一化，默认True
-IVR_TEMPERATURE="${IVR_TEMPERATURE:-1.0}"  # 温度参数，默认1.0
-
+# Loss control
+USE_MSE_LOSS="${USE_MSE_LOSS:-True}"  # Enable MSE/reconstruction loss (default: True)
 LVR_LOSS_FCT=mse
 LAMBDA_LVR=0.1
+
 MAX_TOKEN=5120
 MIN_TOKEN=128
-RUN_NAME="SFT_${LVR_HEAD_TYPE}_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}"
-OUTPUT_DIR="result/${LVR_HEAD_TYPE}/${RUN_NAME}/"
+
+# Build run name and output dir (handle empty LVR_HEAD_TYPE)
+if [ -z "$LVR_HEAD_TYPE" ]; then
+    RUN_NAME="SFT_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}_acc${GRAD_ACCUM_STEPS}_MSE${USE_MSE_LOSS}"
+    OUTPUT_DIR="result/no_head/${RUN_NAME}/"
+else
+    RUN_NAME="SFT_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}_acc${GRAD_ACCUM_STEPS}_MSE${USE_MSE_LOSS}"
+    OUTPUT_DIR="result/${LVR_HEAD_TYPE}/${RUN_NAME}/"
+fi
 
 mkdir -p logs "$OUTPUT_DIR"
+export WANDB_RUN_NAME="$RUN_NAME"
 MASTER_PORT="${MASTER_PORT:-29500}"
 
 # Build deepspeed command with IVR parameters
@@ -72,16 +76,13 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --data_path \"$DATA_PATH\" \
     --remove_unused_columns False \
     --lvr_head $LVR_HEAD \
-    --lvr_head_type $LVR_HEAD_TYPE \
-    --ivr_iterations $IVR_ITERATIONS \
-    --ivr_use_output_norm $IVR_USE_OUTPUT_NORM \
-    --ivr_temperature $IVR_TEMPERATURE \
     --freeze_vision_tower True \
     --freeze_merger True \
     --freeze_llm False \
     --max_steps $MAX_STEPS \
     --learning_rate $LR \
     --loss_lvr_lambda $LAMBDA_LVR \
+    --use_mse_loss $USE_MSE_LOSS \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
@@ -100,7 +101,7 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --report_to wandb \
     --lazy_preprocess True \
     --save_strategy \"steps\" \
-    --save_steps 500 \
+    --save_steps 300 \
     --save_total_limit 10 \
     --dataloader_num_workers 8 \
     --enable_data_packing $DATA_PACKING \
@@ -109,8 +110,16 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --long_seq_threshold $LST \
     --max_instance_per_batch $MAX_INSTANCE_PER_BATCH"
 
-# Add optional IVR chunk_size parameter if it is set
-[ -n "$IVR_CHUNK_SIZE" ] && DEEPSPEED_CMD="$DEEPSPEED_CMD --ivr_chunk_size $IVR_CHUNK_SIZE"
+# Add optional lvr_head_type parameter if it is set
+[ -n "$LVR_HEAD_TYPE" ] && DEEPSPEED_CMD="$DEEPSPEED_CMD --lvr_head_type $LVR_HEAD_TYPE"
+
+# Add IVR parameters only if LVR_HEAD_TYPE is "ivr" or if IVR variables are set
+if [ "$LVR_HEAD_TYPE" = "ivr" ] || [ -n "$IVR_ITERATIONS" ] || [ -n "$IVR_USE_OUTPUT_NORM" ] || [ -n "$IVR_TEMPERATURE" ]; then
+    [ -n "$IVR_ITERATIONS" ] && DEEPSPEED_CMD="$DEEPSPEED_CMD --ivr_iterations $IVR_ITERATIONS"
+    [ -n "$IVR_USE_OUTPUT_NORM" ] && DEEPSPEED_CMD="$DEEPSPEED_CMD --ivr_use_output_norm $IVR_USE_OUTPUT_NORM"
+    [ -n "$IVR_TEMPERATURE" ] && DEEPSPEED_CMD="$DEEPSPEED_CMD --ivr_temperature $IVR_TEMPERATURE"
+    [ -n "$IVR_CHUNK_SIZE" ] && DEEPSPEED_CMD="$DEEPSPEED_CMD --ivr_chunk_size $IVR_CHUNK_SIZE"
+fi
 
 # Execute the command
 eval $DEEPSPEED_CMD
@@ -121,17 +130,31 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Training completed. Starting evaluation..."
-CHECKPOINT_PATH="${PWD}/${OUTPUT_DIR}/checkpoint-${MAX_STEPS}"
+BASE_CHECKPOINT_DIR="${PWD}/${OUTPUT_DIR}"
 
-# Use latest checkpoint if final checkpoint doesn't exist
-[ ! -d "$CHECKPOINT_PATH" ] && \
-    CHECKPOINT_PATH=$(find "${PWD}/${OUTPUT_DIR}" -maxdepth 1 -type d -name "checkpoint-*" | sort -V | tail -n 1)
-
-if [ -d "$CHECKPOINT_PATH" ]; then
-    export CHECKPOINT_PATH DATASET_CONFIG
-    export EVAL_STEP_LIST="${EVAL_STEP_LIST:-4}"
-    bash "${PWD}/scripts/evaluation/evaluation_7b_sbatch.sh" || echo "Warning: Evaluation failed"
+# Check if checkpoint directory exists
+if [ -d "$BASE_CHECKPOINT_DIR" ]; then
+    # Check if there are any checkpoints
+    CHECKPOINT_COUNT=$(find "$BASE_CHECKPOINT_DIR" -type d -name "checkpoint-*" | wc -l)
+    if [ "$CHECKPOINT_COUNT" -gt 0 ]; then
+        echo "Found $CHECKPOINT_COUNT checkpoint(s) in $BASE_CHECKPOINT_DIR"
+        echo "Starting batch evaluation for all checkpoints..."
+        
+        # Export environment variables for evaluation script
+        export BASE_CHECKPOINT_DIR
+        export DATASET_CONFIG="${DATASET_CONFIG:-default}"
+        export EVAL_STEP_LIST="${EVAL_STEP_LIST:-4}"
+        export LVR_SAVE_ACTIVATION_MAPS="${LVR_SAVE_ACTIVATION_MAPS:-0}"
+        
+        # Call the batch evaluation script
+        bash "${PWD}/scripts/evaluation/evaluation_7b_SFT_all_ck.sh" || {
+            echo "Warning: Batch evaluation failed"
+            exit 1
+        }
+    else
+        echo "Warning: No checkpoint directories found in $BASE_CHECKPOINT_DIR. Skipping evaluation."
+    fi
 else
-    echo "Warning: No checkpoint found. Skipping evaluation."
+    echo "Warning: Checkpoint directory not found: $BASE_CHECKPOINT_DIR. Skipping evaluation."
 fi
 

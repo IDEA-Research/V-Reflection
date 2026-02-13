@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 
 from src.params import DataArguments
 from src.constants import SYSTEM_MESSAGE
+from .data_utils import map_image_path
 
 import re
 
@@ -78,9 +79,27 @@ class GRPODataset(Dataset):
     ):
         super(GRPODataset, self).__init__()
         if isinstance(data_path, str):
-            list_data_dict = json.load(open(data_path, "r"))
+            meta_data = json.load(open(data_path, "r"))
         else:
-            list_data_dict = data_path
+            meta_data = data_path
+
+        # Check if it's a meta_data format (SFT format) or direct data format (GRPO format)
+        # Meta_data format: [{"ds_name": "...", "data_path": "...", ...}, ...]
+        # Direct format: [{"conversations": [...], "image": [...]}, ...]
+        if isinstance(meta_data, list) and len(meta_data) > 0 and isinstance(meta_data[0], dict):
+            # Check if it's meta_data format (has 'data_path' key)
+            if 'data_path' in meta_data[0] or 'ds_name' in meta_data[0]:
+                # It's meta_data format (SFT format), load multiple data files
+                list_data_dict = []
+                for data_src in meta_data:
+                    data_buffer_path = data_src['data_path']
+                    data_buffer = json.load(open(data_buffer_path, "r"))
+                    list_data_dict += data_buffer
+            else:
+                # It's direct data format (GRPO format)
+                list_data_dict = meta_data
+        else:
+            list_data_dict = meta_data
 
         self.model_id = model_id
         self.processor = processor
@@ -115,11 +134,13 @@ class GRPODataset(Dataset):
             if isinstance(image_files, str):
                 image_files = [image_files]
             
+            # Get dataset name from sources if available (for path mapping)
+            dataset_name = sources.get('dataset', None)
+            
             for image_file in image_files:
-                if not os.path.exists(image_file):
-                    if not image_file.startswith("http"):
-                        image_file = os.path.join(image_folder, image_file)
-                contents.append(get_image_content(image_file, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
+                # Use map_image_path to handle viscot/ prefix and dataset-specific path mappings
+                mapped_path = map_image_path(image_file, image_folder, dataset_name)
+                contents.append(get_image_content(mapped_path, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h))
 
         elif "video" in sources:
             is_video = True

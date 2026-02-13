@@ -23,15 +23,46 @@ from src.constants import (
     SYSTEM_MESSAGE,
     VISION_START_TOKEN,
     VISION_END_TOKEN,
-    LVR_TOKEN
+    LVR_TOKEN,
+    LVR_PLACEHOLDER,
 )
 from transformers import TrainingArguments
 
 from .data_utils import get_image_info, llava_to_openai_lvr, pad_sequence, map_image_path
 import numpy as np
 from PIL import Image
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 import math
+
+# DiT reconstruction: crop bbox region and resize, normalize to [-1, 1]
+# Default crop size is now controlled via data_args.dit_crop_size (default 128)
+DIT_CROP_SIZE = 128
+
+
+def crop_bbox_and_resize(pil_img: Image.Image, bbox: List[float], size: int = DIT_CROP_SIZE) -> torch.Tensor:
+    """Crop image by normalized bbox [x_min, y_min, x_max, y_max], resize to size x size, return (3, size, size) in [-1, 1]."""
+    w, h = pil_img.size
+    x_min, y_min, x_max, y_max = bbox
+    if max(x_min, y_min, x_max, y_max) > 1.0:
+        x_min, y_min = x_min / w, y_min / h
+        x_max, y_max = x_max / w, y_max / h
+    x_min, y_min = max(0, x_min), max(0, y_min)
+    x_max, y_max = min(1, x_max), min(1, y_max)
+    x1, y1 = int(x_min * w), int(y_min * h)
+    x2, y2 = int(x_max * w), int(y_max * h)
+    if x2 <= x1:
+        x2 = x1 + 1
+    if y2 <= y1:
+        y2 = y1 + 1
+    crop = pil_img.crop((x1, y1, x2, y2))
+    crop = crop.resize((size, size), Image.BICUBIC)
+    arr = np.array(crop)
+    if arr.ndim == 2:
+        arr = np.stack([arr] * 3, axis=-1)
+    arr = arr[:, :, :3].astype(np.float32) / 255.0
+    arr = (arr - 0.5) / 0.5
+    t = torch.from_numpy(arr).permute(2, 0, 1).float()
+    return t
 
 def is_dist_avail_and_initialized():
     if not dist.is_available():
@@ -53,12 +84,14 @@ def get_rank():
     return dist.get_rank()
 
   
-def make_packed_supervised_data_module_lvr(model_id, processor, data_args, training_args: TrainingArguments,latent_end_token=False):
+def make_packed_supervised_data_module_lvr(model_id, processor, data_args, training_args: TrainingArguments, latent_end_token=False, fixed_num_of_lvr_tokens=None):
 
     """Make dataset and collator for supervised fine-tuning."""
 
     data_rank = dist.get_rank()
     data_world_size = dist.get_world_size()
+    if fixed_num_of_lvr_tokens is None:
+        fixed_num_of_lvr_tokens = getattr(data_args, 'fixed_num_of_lvr_tokens', None)
 
     # we assume meta data
     meta_data = json.load(open(data_args.data_path))
@@ -77,7 +110,9 @@ def make_packed_supervised_data_module_lvr(model_id, processor, data_args, train
             data_world_size=data_world_size,
             distributed_mode = training_args.enable_data_packing,    # set for packed dataset
             random_seed=data_args.random_seed,
-            latent_end_token=latent_end_token
+            latent_end_token=latent_end_token,
+            fixed_num_of_lvr_tokens=fixed_num_of_lvr_tokens,
+            max_packed_tokens=training_args.max_packed_tokens,  # For dynamic resolution adjustment
         )
         datasets.append(iterable_sft_dataset)
         total_data_len += len(iterable_sft_dataset)
@@ -128,6 +163,8 @@ class IterableSupervisedDatasetLVR(Dataset):
         distributed_mode = True,    # set for packed dataset
         random_seed=None,
         latent_end_token=False,
+        fixed_num_of_lvr_tokens=None,
+        max_packed_tokens=4096,  # Add max_packed_tokens for dynamic resolution adjustment
     ):
         super().__init__()
         if isinstance(data_path, str):
@@ -139,6 +176,7 @@ class IterableSupervisedDatasetLVR(Dataset):
         self.processor = processor
         self.data_args = data_args
         self.image_folder = image_folder
+        self.fixed_num_of_lvr_tokens = fixed_num_of_lvr_tokens
         self.image_min_pixel = data_args.image_min_pixels
         self.image_max_pixel = data_args.image_max_pixels
         self.video_min_pixel = data_args.video_min_pixels
@@ -149,6 +187,11 @@ class IterableSupervisedDatasetLVR(Dataset):
         self.video_resized_h = data_args.video_resized_height
         self.ds_name = ds_name
         self.fps = data_args.fps
+        
+        # For dynamic resolution adjustment to avoid <lvr> truncation
+        self.max_packed_tokens = max_packed_tokens
+        # Minimum image resolution to avoid quality degradation
+        self.min_image_max_pixel = 500000  # ~700x700 minimum
 
         self.data_world_size = data_world_size
         self.worker_id = None
@@ -165,6 +208,8 @@ class IterableSupervisedDatasetLVR(Dataset):
 
         # int latent_end_token mode, a latent end token wil be appended to the selected lvr tokens
         self.latent_end_token = latent_end_token
+        # DiT crop size: controlled via data_args, default 128
+        self.dit_crop_size = getattr(data_args, 'dit_crop_size', DIT_CROP_SIZE)
 
     def __len__(self):
         return len(self.raw_data)
@@ -176,226 +221,80 @@ class IterableSupervisedDatasetLVR(Dataset):
             which is the best estimation
 
             image_grid_thw is a 2D tensor with a single item
+            
+            Returns:
+                token_idxs: List of token indices for each bbox, or None if any bbox is invalid
 
         """
+        if image_grid_thw is None or image_grid_thw.shape[0] == 0:
+            logger.warning(
+                f"[{self.ds_name}] bbox_to_token_idxs: empty image_grid_thw (shape={getattr(image_grid_thw, 'shape', None)}). "
+                "Returning None so caller skips sample."
+            )
+            return None
         _, h, w = image_grid_thw[0].tolist()
         token_idxs = []
         H2, W2 = h // 2, w // 2
         
-        # CRITICAL: Ensure H2 and W2 are valid (at least 1)
-        if H2 <= 0 or W2 <= 0:
-            worker_id_str = getattr(self, 'worker_id', 'unknown')
-            logger.error(
-                f"[{self.ds_name}] ❌ CRITICAL: Invalid H2={H2} or W2={W2} (h={h}, w={w}), "
-                f"worker_id={worker_id_str}. Cannot generate tokens. Using token 0 for all bboxes."
-            )
-            print(f"[BBOX_INVALID_GRID] h={h}, w={w}, H2={H2}, W2={W2}, worker_id={worker_id_str}, "
-                  f"using_token_0_for_all", flush=True)
-            # Return token 0 for all bboxes
-            for bbox_idx, bbox in enumerate(bboxes):
-                token_idxs.append([0])
-            return token_idxs
-        
-        # Log non-standard grid sizes for debugging
-        if h != 14 or w != 14:
-            if hasattr(self, 'worker_id') and (self.worker_id == 0 or self.worker_id is None):
-                logger.debug(
-                    f"[{self.ds_name}] Non-standard image_grid_thw: h={h}, w={w}, H2={H2}, W2={W2} "
-                    f"(expected h=14, w=14 for standard Qwen2-VL)"
-                )
-        
-        for bbox_idx, bbox in enumerate(bboxes): 
-            x0, y0, x1, y1 = bbox
-
-            # Validate bbox - but don't return empty list, use fallback instead
-            if x1 <= x0 or y1 <= y0:
-                worker_id_str = getattr(self, 'worker_id', 'unknown')
+        for bbox_idx, bbox in enumerate(bboxes):
+            # Validate bbox format
+            try:
+                if not isinstance(bbox, (list, tuple, np.ndarray)):
+                    logger.warning(
+                        f"[{self.ds_name}] Invalid bbox[{bbox_idx}] type: {type(bbox)}, value: {bbox}. "
+                        f"Expected list/tuple/array of 4 values. Skipping this sample."
+                    )
+                    return None  # Return None to indicate invalid bbox, caller should skip
+                
+                # Convert to list if the whole bbox is a numpy array
+                if isinstance(bbox, np.ndarray):
+                    bbox = bbox.tolist()
+                
+                # CRITICAL FIX: Handle nested bbox format like [[x0, y0, x1, y1]]
+                # Keep unwrapping single-element containers
+                while isinstance(bbox, (list, tuple, np.ndarray)) and len(bbox) == 1 and isinstance(bbox[0], (list, tuple, np.ndarray)):
+                    bbox = bbox[0]
+                
+                # Now robustly coerce bbox to a flat array of numeric values
+                bbox_arr = np.array(bbox, dtype=np.float64).reshape(-1)
+                if bbox_arr.size != 4:
+                    logger.warning(
+                        f"[{self.ds_name}] Invalid bbox[{bbox_idx}] flattened size: {bbox_arr.size}, "
+                        f"value: {bbox}. Expected 4 values [x0, y0, x1, y1]. Skipping this sample."
+                    )
+                    return None  # Caller should skip this sample
+                
+                # Extract scalar coordinates; using .item() guarantees 0-d scalars
+                x0, y0, x1, y1 = [float(v.item() if isinstance(v, np.generic) else v) for v in bbox_arr]
+                
+            except (ValueError, TypeError) as e:
                 logger.warning(
-                    f"[{self.ds_name}] Invalid bbox[{bbox_idx}]: {bbox} (x1<=x0 or y1<=y0), "
-                    f"h={h}, w={w}, H2={H2}, W2={W2}, worker_id={worker_id_str}. "
-                    f"Using image center token as fallback."
+                    f"[{self.ds_name}] Error unpacking/coercing bbox[{bbox_idx}]: {bbox}, error: {e}. "
+                    f"Skipping this sample."
                 )
-                print(f"[BBOX_INVALID_FALLBACK] bbox={bbox}, h={h}, w={w}, H2={H2}, W2={W2}, "
-                      f"worker_id={worker_id_str}, reason=invalid_bbox", flush=True)
-                # Use image center as fallback for invalid bbox
-                center_x_token = W2 // 2
-                center_y_token = H2 // 2
-                center_token_idx = int(center_y_token * W2 + center_x_token)
-                valid_idxs = [center_token_idx]
-                token_idxs.append(valid_idxs)
-                continue
+                return None  # Return None to indicate invalid bbox, caller should skip
 
-            # Scale to grid (typically 14x14)
+            # Scale to 14by14 grid
             x0_grid = max(0, min(int(np.floor(x0 * w)), w-1))
             x1_grid = max(0, min(int(np.ceil (x1 * w)), w))
             y0_grid = max(0, min(int(np.floor(y0 * h)), h-1))
             y1_grid = max(0, min(int(np.ceil (y1 * h)), h))
 
-            # Handle edge case: if bbox maps to same grid cell, ensure at least one token
-            # This happens when bbox is very small and x0_grid == x1_grid or y0_grid == y1_grid
-            if x0_grid == x1_grid:
-                # Expand x1_grid to ensure at least one grid cell
-                if x1_grid < w:
-                    x1_grid = x1_grid + 1
-                elif x0_grid > 0:
-                    x0_grid = x0_grid - 1
-                else:
-                    # Can't expand, will result in empty tokens
-                    pass
-            
-            if y0_grid == y1_grid:
-                # Expand y1_grid to ensure at least one grid cell
-                if y1_grid < h:
-                    y1_grid = y1_grid + 1
-                elif y0_grid > 0:
-                    y0_grid = y0_grid - 1
-                else:
-                    # Can't expand, will result in empty tokens
-                    pass
 
-            # Map to token grid (H2 x W2, typically 7x7)
+            # Map to 28by28 grid
             x0_token = x0_grid // 2
             x1_token = (x1_grid + 1) // 2
             y0_token = y0_grid // 2
             y1_token = (y1_grid + 1) // 2
-
-            # Ensure at least one token in each dimension
-            if x0_token >= x1_token:
-                x1_token = x0_token + 1
-            if y0_token >= y1_token:
-                y1_token = y0_token + 1
-
-            # Final bounds check to ensure valid ranges
-            x0_token = max(0, min(x0_token, W2 - 1))
-            x1_token = max(x0_token + 1, min(x1_token, W2))
-            y0_token = max(0, min(y0_token, H2 - 1))
-            y1_token = max(y0_token + 1, min(y1_token, H2))
-            
-            # Check if ranges are valid (should not happen after above fixes, but keep for safety)
-            if x0_token >= x1_token or y0_token >= y1_token:
-                logger.warning(
-                    f"[{self.ds_name}] Empty token range after all fixes for bbox[{bbox_idx}]: {bbox}, "
-                    f"h={h}, w={w}, H2={H2}, W2={W2}, "
-                    f"x0_grid={x0_grid}, x1_grid={x1_grid}, y0_grid={y0_grid}, y1_grid={y1_grid}, "
-                    f"x0_token={x0_token}, x1_token={x1_token}, y0_token={y0_token}, y1_token={y1_token}. "
-                    f"Will use fallback strategy in token generation."
-                )
-                # Don't append empty list - let fallback strategy handle it below
-                # Set to use first token as minimum fallback
-                x0_token, x1_token = 0, min(1, W2)
-                y0_token, y1_token = 0, min(1, H2)
 
             idxs = [
                 int(yy * W2 + xx)
                 for yy in range(y0_token, y1_token)
                 for xx in range(x0_token, x1_token)
             ]
-            
-            # Filter out invalid indices first
-            valid_idxs = [idx for idx in idxs if 0 <= idx < H2 * W2]
-            
-            # CRITICAL: If no valid tokens generated, use fallback strategy
-            if len(valid_idxs) == 0:
-                # Always log, not just worker_id == 0, to catch all cases
-                worker_id_str = getattr(self, 'worker_id', 'unknown')
-                logger.error(
-                    f"[{self.ds_name}] ❌ CRITICAL: Generated empty or invalid idxs for bbox[{bbox_idx}]: {bbox}, "
-                    f"h={h}, w={w}, H2={H2}, W2={W2}, worker_id={worker_id_str}, "
-                    f"x0_grid={x0_grid}, x1_grid={x1_grid}, y0_grid={y0_grid}, y1_grid={y1_grid}, "
-                    f"x0_token={x0_token}, x1_token={x1_token}, y0_token={y0_token}, y1_token={y1_token}, "
-                    f"x_range={list(range(x0_token, x1_token))}, y_range={list(range(y0_token, y1_token))}, "
-                    f"original_idxs={idxs[:10]}. Using fallback: bbox center token."
-                )
-                print(f"[BBOX_FALLBACK_TRIGGERED] bbox={bbox}, h={h}, w={w}, H2={H2}, W2={W2}, "
-                      f"worker_id={worker_id_str}, x0_token={x0_token}, x1_token={x1_token}, "
-                      f"y0_token={y0_token}, y1_token={y1_token}, empty_idxs=True", flush=True)
-                
-                # Fallback strategy 1: Use bbox center
-                x_center = (x0 + x1) / 2.0
-                y_center = (y0 + y1) / 2.0
-                
-                # Map center to grid
-                x_center_grid = max(0, min(int(np.round(x_center * w)), w-1))
-                y_center_grid = max(0, min(int(np.round(y_center * h)), h-1))
-                
-                # Map to token grid
-                x_center_token = max(0, min(x_center_grid // 2, W2 - 1))
-                y_center_token = max(0, min(y_center_grid // 2, H2 - 1))
-                
-                center_token_idx = int(y_center_token * W2 + x_center_token)
-                
-                if 0 <= center_token_idx < H2 * W2:
-                    valid_idxs = [center_token_idx]
-                    worker_id_str = getattr(self, 'worker_id', 'unknown')
-                    logger.info(
-                        f"[{self.ds_name}] ✓ Fallback successful: using center token {center_token_idx} "
-                        f"for bbox[{bbox_idx}] center=({x_center:.4f}, {y_center:.4f}), worker_id={worker_id_str}"
-                    )
-                    print(f"[BBOX_FALLBACK_SUCCESS] bbox={bbox}, center_token={center_token_idx}, "
-                          f"center=({x_center:.4f}, {y_center:.4f}), worker_id={worker_id_str}", flush=True)
-                    print(f"[BBOX_FALLBACK_SUCCESS] bbox={bbox}, center_token={center_token_idx}, "
-                          f"center=({x_center:.4f}, {y_center:.4f}), worker_id={worker_id_str}", flush=True)
-                else:
-                    # Fallback strategy 2: Use image center
-                    center_x_token = W2 // 2
-                    center_y_token = H2 // 2
-                    center_token_idx = int(center_y_token * W2 + center_x_token)
-                    valid_idxs = [center_token_idx]
-                    logger.warning(
-                        f"[{self.ds_name}] Bbox center fallback failed, using image center token {center_token_idx} "
-                        f"for bbox[{bbox_idx}]"
-                    )
-            
-            # Check for invalid indices (should not happen after filtering, but keep for safety)
-            invalid_indices = [idx for idx in valid_idxs if idx < 0 or idx >= H2 * W2]
-            if invalid_indices:
-                logger.error(
-                    f"[{self.ds_name}] CRITICAL: Still have invalid token indices after filtering! "
-                    f"bbox[{bbox_idx}]: {bbox}, invalid_indices={invalid_indices}, "
-                    f"valid range: [0, {H2 * W2}). This should not happen!"
-                )
-                # Remove invalid indices
-                valid_idxs = [idx for idx in valid_idxs if 0 <= idx < H2 * W2]
-                
-                # If still empty after filtering, use image center as last resort
-                if len(valid_idxs) == 0:
-                    center_x_token = W2 // 2
-                    center_y_token = H2 // 2
-                    center_token_idx = int(center_y_token * W2 + center_x_token)
-                    valid_idxs = [center_token_idx]
-                    logger.error(
-                        f"[{self.ds_name}] CRITICAL: All tokens invalid, using image center token {center_token_idx} "
-                        f"as last resort for bbox[{bbox_idx}]"
-                    )
-            
-            # FINAL GUARANTEE: Ensure valid_idxs is never empty
-            if len(valid_idxs) == 0:
-                # Ultimate fallback: use first token (0, 0)
-                center_token_idx = 0
-                valid_idxs = [center_token_idx]
-                worker_id_str = getattr(self, 'worker_id', 'unknown')
-                logger.error(
-                    f"[{self.ds_name}] ❌ CRITICAL: All fallback strategies failed for bbox[{bbox_idx}]: {bbox}, "
-                    f"h={h}, w={w}, H2={H2}, W2={W2}, worker_id={worker_id_str}. Using token 0 as ultimate fallback."
-                )
-                print(f"[BBOX_ULTIMATE_FALLBACK] bbox={bbox}, h={h}, w={w}, H2={H2}, W2={W2}, "
-                      f"worker_id={worker_id_str}, using_token_0=True", flush=True)
 
-            token_idxs.append(valid_idxs)
+            token_idxs.append(idxs)
 
-        # FINAL VERIFICATION: Ensure no empty lists in token_idxs
-        for bbox_idx, idx_list in enumerate(token_idxs):
-            if len(idx_list) == 0:
-                worker_id_str = getattr(self, 'worker_id', 'unknown')
-                logger.error(
-                    f"[{self.ds_name}] ❌ CRITICAL: Found empty token list at bbox_idx={bbox_idx} "
-                    f"after all processing! h={h}, w={w}, H2={H2}, W2={W2}, worker_id={worker_id_str}. "
-                    f"Using token 0 as emergency fallback."
-                )
-                print(f"[BBOX_EMERGENCY_FALLBACK] bbox_idx={bbox_idx}, h={h}, w={w}, H2={H2}, W2={W2}, "
-                      f"worker_id={worker_id_str}, using_token_0=True", flush=True)
-                token_idxs[bbox_idx] = [0]  # Emergency fallback: use token 0
-        
         return token_idxs
 
     def _enable_worker_distributed(self):
@@ -440,8 +339,25 @@ class IterableSupervisedDatasetLVR(Dataset):
             image_files = sources["image"]
             image_folder = self.image_folder
 
+            # Normalize image_files to a flat list of strings
             if isinstance(image_files, str):
                 image_files = [image_files]
+            elif isinstance(image_files, list):
+                # Flatten nested lists if any
+                flattened = []
+                for item in image_files:
+                    if isinstance(item, str):
+                        flattened.append(item)
+                    elif isinstance(item, list):
+                        # Handle nested lists
+                        flattened.extend([x for x in item if isinstance(x, str)])
+                    else:
+                        # Skip non-string items
+                        logger.warning(f"[{self.ds_name}] Skipping non-string image item: {type(item)}")
+                image_files = flattened
+            else:
+                logger.warning(f"[{self.ds_name}] Unexpected image_files type: {type(image_files)}, converting to list")
+                image_files = [str(image_files)] if image_files is not None else []
 
             images = []
             skipped_images = []
@@ -449,26 +365,158 @@ class IterableSupervisedDatasetLVR(Dataset):
             # Get dataset name from sources if available
             dataset_name = sources.get('dataset', None)
             
+            # Helper function to load images with given max_pixel
+            def load_images_with_resolution(max_pixel):
+                imgs = []
+                for image_file in image_files:
+                    if not isinstance(image_file, str):
+                        continue
+                    mapped_path = map_image_path(image_file, image_folder, dataset_name)
+                    image_info = get_image_info(mapped_path, self.image_min_pixel, max_pixel, self.image_resized_w, self.image_resized_h)
+                    if image_info is not None:
+                        imgs.append(image_info)
+                return imgs
+            
+            # First pass: load images with default resolution
+            current_max_pixel = self.image_max_pixel
+            images = load_images_with_resolution(current_max_pixel)
+            
+            # Track skipped images for logging
             for image_file in image_files:
-                # Map image path using dataset-specific mapping
+                if not isinstance(image_file, str):
+                    logger.warning(f"[{self.ds_name}] Skipping non-string image_file: {type(image_file)}")
+                    continue
                 mapped_path = map_image_path(image_file, image_folder, dataset_name)
-                image_info = get_image_info(mapped_path, self.image_min_pixel, self.image_max_pixel, self.image_resized_w, self.image_resized_h)
-                # Skip if image file not found
-                if image_info is None:
+                if mapped_path is None or not os.path.exists(mapped_path):
                     display_path = mapped_path if mapped_path is not None else image_file
                     skipped_images.append(display_path)
                     logger.warning(f"[{self.ds_name}] Skipping missing image - original: {image_file}, searched path: {display_path}")
-                    continue
-                images.append(image_info)
             
-            # Skip this sample if no valid images found
+            # Skip this sample if no valid images found (required for 8-card: some workers get shards with all missing images)
             if len(images) == 0:
-                logger.warning(f"[{self.ds_name}] Skipping sample {i} - all images missing: {skipped_images}")
+                logger.warning(
+                    f"[{self.ds_name}] Skipping sample {i} - all images missing: {skipped_images}. "
+                    f"worker_id={getattr(self, 'worker_id', '?')}. Required to avoid IndexError in bbox_to_token_idxs with empty image_grid_thw."
+                )
                 continue
 
-            # Extract LVR tokens
+            # Extract LVR tokens and estimate sequence length
             image_grid_thw = processor(text=[""], images=images, videos=videos, padding=False, do_resize=False, return_tensors='pt')['image_grid_thw']
+            
+            # === DYNAMIC RESOLUTION ADJUSTMENT ===
+            # Estimate sequence length: image_tokens + text_tokens + lvr_tokens
+            # image_tokens ≈ T * H/2 * W/2 for Qwen2-VL
+            _, h, w = image_grid_thw[0].tolist()
+            estimated_image_tokens = h * w // 4  # Qwen2-VL uses 2x2 merging
+            num_bboxes = len(sources.get('bboxes', []))
+            num_lvr_tokens = num_bboxes * (self.fixed_num_of_lvr_tokens or 8)  # Default 8 tokens per bbox
+            # Estimate text tokens (system + question + answer) ~300-500 tokens typically
+            estimated_text_tokens = 500
+            estimated_total = estimated_image_tokens + num_lvr_tokens + estimated_text_tokens
+            
+            # If sequence would exceed 90% of max_packed_tokens, reduce image resolution
+            max_allowed = int(self.max_packed_tokens * 0.85)  # 85% threshold for safety
+            resolution_reduced = False
+            
+            while estimated_total > max_allowed and current_max_pixel > self.min_image_max_pixel:
+                # Calculate target image tokens
+                target_image_tokens = max_allowed - num_lvr_tokens - estimated_text_tokens
+                if target_image_tokens < 500:  # Minimum image tokens
+                    break
+                
+                # Reduce resolution by ratio (pixel count is proportional to token count)
+                reduction_ratio = target_image_tokens / estimated_image_tokens
+                new_max_pixel = int(current_max_pixel * reduction_ratio * 0.9)  # Extra 10% reduction for safety
+                new_max_pixel = max(new_max_pixel, self.min_image_max_pixel)
+                
+                if new_max_pixel >= current_max_pixel:
+                    break  # Cannot reduce further
+                
+                if self.worker_id == 0 or self.worker_id is None:
+                    logger.info(
+                        f"[{self.ds_name}] 📐 Dynamic resolution adjustment: "
+                        f"estimated_total={estimated_total} > max_allowed={max_allowed}, "
+                        f"reducing max_pixel from {current_max_pixel} to {new_max_pixel}"
+                    )
+                
+                current_max_pixel = new_max_pixel
+                images = load_images_with_resolution(current_max_pixel)
+                
+                if len(images) == 0:
+                    break
+                
+                image_grid_thw = processor(text=[""], images=images, videos=videos, padding=False, do_resize=False, return_tensors='pt')['image_grid_thw']
+                _, h, w = image_grid_thw[0].tolist()
+                estimated_image_tokens = h * w // 4
+                estimated_total = estimated_image_tokens + num_lvr_tokens + estimated_text_tokens
+                resolution_reduced = True
+            
+            if resolution_reduced and (self.worker_id == 0 or self.worker_id is None):
+                logger.info(
+                    f"[{self.ds_name}] ✅ Resolution reduced: final estimated_total={estimated_total}, "
+                    f"final max_pixel={current_max_pixel}, image_grid_thw={image_grid_thw[0].tolist()}"
+                )
+            
+            # === SKIP OVERLONG SAMPLES ===
+            # If still too long after reducing to minimum resolution, skip this sample
+            if estimated_total > max_allowed:
+                logger.warning(
+                    f"[{self.ds_name}] ⏭️ Skipping overlong sample {i}: "
+                    f"estimated_total={estimated_total} > max_allowed={max_allowed} "
+                    f"even after reducing to min_pixel={current_max_pixel}. "
+                    f"image_grid_thw={image_grid_thw[0].tolist()}, num_bboxes={num_bboxes}"
+                )
+                continue
+            
             lvr_token_idxs_list = self.bbox_to_token_idxs(sources['bboxes'], image_grid_thw)
+            
+            # Skip this sample if bbox_to_token_idxs returns None (invalid bbox detected)
+            if lvr_token_idxs_list is None:
+                logger.warning(
+                    f"[{self.ds_name}] Skipping sample {i} - invalid bbox format detected. "
+                    f"bboxes={sources.get('bboxes', [])}"
+                )
+                continue
+            
+            # === ALIGN LVR TOKENS WITH <lvr> PLACEHOLDERS ===
+            # For viscot_x 数据集，常见情况是 bboxes 有多个框，但 prompt 里只放了 1 个 LVR_PLACEHOLDER。
+            # replace_lvr_tokens 在这种情况下只会用前 N 个 lvr_token_idxs_list 元素生成 <lvr> token，
+            # 但我们这里的 lvr_tokens 仍然包含所有 bbox，对应关系就会错位，造成数量不匹配。
+            #
+            # 这里按原始 conversations 里出现的 LVR_PLACEHOLDER 次数来裁剪 lvr_token_idxs_list，
+            # 保证：
+            #   len(lvr_token_idxs_list_used) == num_placeholders
+            # 从而使 input_ids 里的 <lvr> 个数和 lvr_tokens 的总长度一致。
+            if self.fixed_num_of_lvr_tokens is None:
+                num_placeholders = 0
+                raw_convs = self.raw_data[i].get('conversations', [])
+                for conv in raw_convs:
+                    value = conv.get('value', '')
+                    if isinstance(value, str):
+                        num_placeholders += value.count(LVR_PLACEHOLDER)
+                if num_placeholders == 0:
+                    # 没有 LVR_PLACEHOLDER，则不应该有任何 lvr_tokens
+                    logger.warning(
+                        f"[{self.ds_name}] Sample {i} has {len(lvr_token_idxs_list)} bboxes "
+                        f"but no LVR_PLACEHOLDER in conversations. "
+                        f"Clearing lvr_token_idxs_list to avoid mismatch."
+                    )
+                    lvr_token_idxs_list = []
+                elif len(lvr_token_idxs_list) > num_placeholders:
+                    logger.warning(
+                        f"[{self.ds_name}] Sample {i} has {len(lvr_token_idxs_list)} bbox groups "
+                        f"but only {num_placeholders} LVR_PLACEHOLDER occurrences. "
+                        f"Using first {num_placeholders} groups to align with prompts."
+                    )
+                    lvr_token_idxs_list = lvr_token_idxs_list[:num_placeholders]
+                elif len(lvr_token_idxs_list) < num_placeholders:
+                    # 占位符比 bbox 多，这样很难保证一一对应，直接跳过样本以避免崩溃
+                    logger.warning(
+                        f"[{self.ds_name}] Sample {i} has only {len(lvr_token_idxs_list)} bbox groups "
+                        f"but {num_placeholders} LVR_PLACEHOLDER occurrences. "
+                        f"Skipping this sample to avoid lvr_tokens mismatch."
+                    )
+                    continue
             
             # CRITICAL: Debug log immediately after bbox_to_token_idxs returns
             # Check for empty groups in lvr_token_idxs_list
@@ -487,17 +535,26 @@ class IterableSupervisedDatasetLVR(Dataset):
                           f"lvr_token_idxs_list={lvr_token_idxs_list}", flush=True)
             
             # Validate lvr_token_idxs_list - check for empty token lists
+            # TEMPORARILY DISABLED: Skip logic disabled for testing
             if len(lvr_token_idxs_list) == 0:
                 if self.worker_id == 0:
                     logger.warning(
-                        f"[{self.ds_name}] Empty lvr_token_idxs_list for data_idx={i}, "
+                        f"[{self.ds_name}] TEMPORARILY DISABLED: Empty lvr_token_idxs_list for data_idx={i}, "
                         f"bboxes={sources.get('bboxes', [])}, "
                         f"image_grid_thw={image_grid_thw[0].tolist()}. "
-                        f"Skipping this sample."
+                        f"Would skip but continuing anyway."
                     )
-                continue
+                # continue  # TEMPORARILY DISABLED
+                # Create empty list to continue processing
+                lvr_token_idxs_list = [[]]
 
-            sources = copy.deepcopy(llava_to_openai_lvr(sources['conversations'], is_video=is_video,lvr_token_idxs_list=lvr_token_idxs_list,latent_end_token=self.latent_end_token))
+            # Save bboxes before sources is reassigned to a list
+            bboxes = sources.get('bboxes', [])
+            
+            sources = copy.deepcopy(llava_to_openai_lvr(
+                sources['conversations'], is_video=is_video, lvr_token_idxs_list=lvr_token_idxs_list,
+                latent_end_token=self.latent_end_token, fixed_num_of_lvr_tokens=self.fixed_num_of_lvr_tokens,
+            ))
 
             all_input_ids = [] 
             all_labels = []
@@ -572,12 +629,12 @@ class IterableSupervisedDatasetLVR(Dataset):
                     empty_lvr_tokens_found = True
                     # Always log, not just worker_id == 0, to catch all cases
                     logger.error(
-                        f"[{self.ds_name}] ❌ CRITICAL: Empty lvr_token_idxs_list[{group_idx}] for bbox {sources.get('bboxes', [])[group_idx] if group_idx < len(sources.get('bboxes', [])) else 'unknown'}, "
+                        f"[{self.ds_name}] ❌ CRITICAL: Empty lvr_token_idxs_list[{group_idx}] for bbox {bboxes[group_idx] if group_idx < len(bboxes) else 'unknown'}, "
                         f"image_grid_thw={image_grid_thw[0].tolist()}, "
                         f"data_idx={i}, worker_id={self.worker_id}. This will cause NaN loss!"
                     )
                     print(f"[EMPTY_GROUP_DETECTED] group_idx={group_idx}, data_idx={i}, worker_id={worker_id_str}, "
-                          f"bbox={sources.get('bboxes', [])[group_idx] if group_idx < len(sources.get('bboxes', [])) else 'unknown'}, "
+                          f"bbox={bboxes[group_idx] if group_idx < len(bboxes) else 'unknown'}, "
                           f"image_grid_thw={image_grid_thw[0].tolist()}", flush=True)
                 
                 token_tensor = torch.tensor(group, dtype=torch.int)
@@ -593,20 +650,39 @@ class IterableSupervisedDatasetLVR(Dataset):
                     empty_lvr_tokens_found = True
                     break
             
+            # TEMPORARILY DISABLED: Skip logic disabled for testing
             if empty_lvr_tokens_found:
-                # Always log and skip, regardless of worker_id
+                # Always log but don't skip, regardless of worker_id
                 logger.error(
-                    f"[{self.ds_name}] ❌ CRITICAL: Empty lvr_tokens detected for data_idx={i}, worker_id={self.worker_id}! "
-                    f"Bboxes: {sources.get('bboxes', [])}, "
+                    f"[{self.ds_name}] ❌ TEMPORARILY DISABLED: Empty lvr_tokens detected for data_idx={i}, worker_id={self.worker_id}! "
+                    f"Bboxes: {bboxes}, "
                     f"image_grid_thw={image_grid_thw[0].tolist()}, "
                     f"lvr_token_idxs_list lengths: {[len(g) for g in lvr_token_idxs_list]}, "
                     f"lvr_tokens numel: {[t.numel() for t in lvr_tokens]}. "
-                    f"Skipping this sample to prevent NaN loss."
+                    f"Would skip but continuing anyway - may cause NaN loss."
                 )
-                print(f"[SKIP_SAMPLE] data_idx={i}, worker_id={self.worker_id}, bboxes={sources.get('bboxes', [])}, "
+                print(f"[SKIP_SAMPLE_DISABLED] data_idx={i}, worker_id={self.worker_id}, bboxes={bboxes}, "
                       f"image_grid_thw={image_grid_thw[0].tolist()}, "
                       f"lvr_tokens_empty=True", flush=True)
-                continue  # Skip this sample immediately
+                # continue  # TEMPORARILY DISABLED - Skip this sample immediately
+                # Replace empty tensors with a dummy token [0] to avoid downstream errors
+                for idx, token_tensor in enumerate(lvr_tokens):
+                    if token_tensor.numel() == 0:
+                        lvr_tokens[idx] = torch.tensor([0], dtype=torch.int)
+                        logger.warning(f"[{self.ds_name}] Replaced empty lvr_tokens[{idx}] with dummy token [0]")
+
+            cropped_bbox_images = None
+            if len(images) > 0 and len(bboxes) > 0 and len(bboxes) == len(lvr_token_idxs_list):
+                crops = []
+                img = images[0]
+                for bbox in bboxes:
+                    b = bbox
+                    while isinstance(b, (list, tuple)) and len(b) == 1 and isinstance(b[0], (list, tuple)):
+                        b = b[0]
+                    if isinstance(b, (list, tuple)) and len(b) >= 4:
+                        crops.append(crop_bbox_and_resize(img, list(b)[:4], size=self.dit_crop_size))
+                if crops:
+                    cropped_bbox_images = torch.stack(crops, dim=0)
 
             data_dict = dict(
                 input_ids=input_ids,
@@ -614,6 +690,8 @@ class IterableSupervisedDatasetLVR(Dataset):
                 labels=labels,
                 lvr_tokens=lvr_tokens,
             )
+            if cropped_bbox_images is not None:
+                data_dict['cropped_bbox_images'] = cropped_bbox_images
 
             if pixel_key and grid_key:
                 pixel_values = torch.cat(all_pixel_values, dim=0)
@@ -654,6 +732,68 @@ class IterableSupervisedDatasetLVR(Dataset):
             data_dict['_debug_image_paths'] = debug_image_paths
             data_dict['_debug_bboxes'] = debug_bboxes
             data_dict['_debug_data_idx'] = debug_data_idx
+            
+            # CRITICAL VALIDATION: Check consistency between <lvr> tokens in input_ids and lvr_tokens.
+            # NOTE:
+            #   - In variable-length LVR mode (fixed_num_of_lvr_tokens is None), each <lvr> corresponds to ONE visual token index,
+            #     so we can safely require:
+            #         num_lvr_in_input_ids == total_lvr_tokens.
+            #   - In fixed-length latent mode (self.fixed_num_of_lvr_tokens > 0, e.g. BoxFeatureResampler / DiT recon),
+            #     each bbox uses `fixed_num_of_lvr_tokens` <lvr> slots, while lvr_tokens stores a *set* of visual
+            #     token indices per bbox. In this case, the only meaningful check is:
+            #         num_lvr_in_input_ids == fixed_num_of_lvr_tokens * num_bboxes
+            #     where num_bboxes == len(lvr_tokens). Comparing num_lvr_in_input_ids with the *sum* of all
+            #     visual token indices (total_lvr_tokens) is incorrect and will always "mismatch".
+            lvr_token_id = self.processor.tokenizer.convert_tokens_to_ids(LVR_TOKEN)
+            num_lvr_in_input_ids = (input_ids == lvr_token_id).sum().item()
+
+            if self.fixed_num_of_lvr_tokens:
+                # Fixed-N latent mode (BoxFeatureResampler / DiT recon): check per-bbox slot count.
+                if num_lvr_in_input_ids % self.fixed_num_of_lvr_tokens != 0:
+                    logger.error(
+                        f"[{self.ds_name}] ❌ CRITICAL: lvr_tokens slot mismatch in fixed-N mode! "
+                        f"input_ids has {num_lvr_in_input_ids} <lvr> tokens which is not divisible by "
+                        f"fixed_num_of_lvr_tokens={self.fixed_num_of_lvr_tokens}. "
+                        f"data_idx={i}, worker_id={self.worker_id}, "
+                        f"image_files={image_files[:2] if len(image_files) > 2 else image_files}, "
+                        f"bboxes={bboxes[:2] if len(bboxes) > 2 else bboxes}, "
+                        f"image_grid_thw={image_grid_thw[0].tolist() if image_grid_thw is not None and len(image_grid_thw) > 0 else 'None'}. "
+                        f"SKIPPING this sample to prevent forward crash."
+                    )
+                    continue
+
+                expected_num_bboxes = num_lvr_in_input_ids // self.fixed_num_of_lvr_tokens
+                actual_num_bboxes = len(lvr_tokens)
+                if actual_num_bboxes != expected_num_bboxes:
+                    logger.error(
+                        f"[{self.ds_name}] ❌ CRITICAL: lvr_tokens bbox count mismatch in fixed-N mode! "
+                        f"input_ids has {num_lvr_in_input_ids} <lvr> tokens -> "
+                        f"expected {expected_num_bboxes} bbox groups "
+                        f"(fixed_num_of_lvr_tokens={self.fixed_num_of_lvr_tokens}), "
+                        f"but lvr_tokens has {actual_num_bboxes} groups. "
+                        f"data_idx={i}, worker_id={self.worker_id}, "
+                        f"image_files={image_files[:2] if len(image_files) > 2 else image_files}, "
+                        f"bboxes={bboxes[:2] if len(bboxes) > 2 else bboxes}, "
+                        f"image_grid_thw={image_grid_thw[0].tolist() if image_grid_thw is not None and len(image_grid_thw) > 0 else 'None'}. "
+                        f"SKIPPING this sample to prevent forward crash."
+                    )
+                    continue
+            else:
+                # Variable-length LVR mode: original strict 1:1 check.
+                total_lvr_tokens = sum(
+                    t.numel() if isinstance(t, torch.Tensor) else len(t) for t in lvr_tokens
+                )
+                if num_lvr_in_input_ids != total_lvr_tokens:
+                    logger.error(
+                        f"[{self.ds_name}] ❌ CRITICAL: lvr_tokens count mismatch! "
+                        f"input_ids has {num_lvr_in_input_ids} <lvr> tokens but lvr_tokens has {total_lvr_tokens} tokens. "
+                        f"data_idx={i}, worker_id={self.worker_id}, "
+                        f"image_files={image_files[:2] if len(image_files) > 2 else image_files}, "
+                        f"bboxes={bboxes[:2] if len(bboxes) > 2 else bboxes}, "
+                        f"image_grid_thw={image_grid_thw[0].tolist() if image_grid_thw is not None and len(image_grid_thw) > 0 else 'None'}. "
+                        f"SKIPPING this sample to prevent forward crash."
+                    )
+                    continue  # Skip this problematic sample
             
             # Instead of returning, we yield the processed dictionary
             yield data_dict
@@ -747,12 +887,6 @@ class PackedDataset(IterableDataset):
         self.datasets = [ds for ds in self.datasets_orig]
         self.dataset_weight = [w for w in self.dataset_weight_orig]
 
-        print("#"*42)
-        print(f"Training with datasets and their weights:")
-        for d,w in zip(datasets,self.dataset_weight):
-            print(f"{d.ds_name}:\t{w}")
-        print("#"*42)
-
         # lazy init
         self.worker_id = None
         self.worker_state_key = None
@@ -830,18 +964,25 @@ class PackedDataset(IterableDataset):
                                     empty_found = True
                                     break
                         
+                        # TEMPORARILY DISABLED: Skip logic disabled for testing
                         if empty_found:
-                            # Always log and skip, not just when _should_log()
+                            # Always log but don't skip, not just when _should_log()
                             logger.error(
-                                f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens detected in sample from {self.datasets[current_dataset_idx].ds_name}! "
+                                f"[PackedDataset] ❌ TEMPORARILY DISABLED: Empty lvr_tokens detected in sample from {self.datasets[current_dataset_idx].ds_name}! "
                                 f"worker_id={self.worker_id}, data_rank={self.data_rank}, "
                                 f"lvr_tokens numel: {[t.numel() if isinstance(t, torch.Tensor) else len(t) for t in lvr_tokens]}. "
-                                f"Skipping this sample to prevent NaN loss."
+                                f"Would skip but continuing anyway - may cause NaN loss."
                             )
-                            print(f"[SKIP_SAMPLE_PACKED] worker_id={self.worker_id}, data_rank={self.data_rank}, "
+                            print(f"[SKIP_SAMPLE_PACKED_DISABLED] worker_id={self.worker_id}, data_rank={self.data_rank}, "
                                   f"ds_name={self.datasets[current_dataset_idx].ds_name}, "
                                   f"lvr_tokens_empty=True", flush=True)
-                            continue  # Skip this sample and get next one
+                            # continue  # TEMPORARILY DISABLED - Skip this sample and get next one
+                            # Replace empty tensors with dummy token [0] to avoid downstream errors
+                            for idx, token_group in enumerate(lvr_tokens):
+                                if isinstance(token_group, torch.Tensor) and token_group.numel() == 0:
+                                    lvr_tokens[idx] = torch.tensor([0], dtype=torch.int)
+                                elif isinstance(token_group, list) and len(token_group) == 0:
+                                    lvr_tokens[idx] = torch.tensor([0], dtype=torch.int)
                 
                 break  # Exit loop if successful
             except StopIteration:
@@ -984,6 +1125,70 @@ class PackedDataset(IterableDataset):
                 is_image_end = input_ids[cut_idx].item() == img_end_token_id
                 return is_image_start or is_image_token or is_image_end
         
+        def _find_lvr_aware_cut_id(input_ids, default_cut_id, lvr_token_id, max_tokens):
+            """
+            Improved truncation strategy: try to preserve <lvr> tokens when possible.
+            
+            Strategy:
+            1. Find all <lvr> token positions in the sequence
+            2. If first <lvr> token is before default_cut_id, use default (all <lvr> tokens preserved)
+            3. If first <lvr> token is after default_cut_id:
+               - Try to extend cut_id to include at least the first group of <lvr> tokens
+               - But don't extend beyond max_tokens * 1.2 to avoid memory issues
+               - Also ensure we don't cut in the middle of image tokens
+            4. Return the adjusted cut_id
+            """
+            if lvr_token_id is None:
+                return default_cut_id
+            
+            # Find all <lvr> token positions
+            lvr_positions = (input_ids == lvr_token_id).nonzero(as_tuple=True)[0]
+            
+            if len(lvr_positions) == 0:
+                # No <lvr> tokens in sequence, use default
+                return default_cut_id
+            
+            first_lvr_pos = lvr_positions[0].item()
+            last_lvr_pos = lvr_positions[-1].item()
+            
+            # If first <lvr> token is already within cut range, use default
+            if first_lvr_pos < default_cut_id:
+                return default_cut_id
+            
+            # First <lvr> token is outside cut range, try to extend
+            # We want to include all <lvr> tokens (typically 8 per bbox)
+            # Add some buffer (+10) after last <lvr> token for potential following text
+            desired_cut_id = last_lvr_pos + 10
+            
+            # Don't extend too much - cap at 1.2x max_tokens to avoid memory explosion
+            max_extended_cut_id = int(max_tokens * 1.2)
+            
+            if desired_cut_id <= max_extended_cut_id and desired_cut_id <= input_ids.size(0):
+                # Check if this extended cut would split an image
+                if not _image_is_splitted(input_ids, desired_cut_id):
+                    logger.info(
+                        f"[PackedDataset] 📐 Extended cut_id from {default_cut_id} to {desired_cut_id} "
+                        f"to preserve <lvr> tokens (first_lvr_pos={first_lvr_pos}, last_lvr_pos={last_lvr_pos})"
+                    )
+                    return desired_cut_id
+                else:
+                    # Extended cut would split image, try to find a safe cut point after last <lvr>
+                    for safe_cut in range(last_lvr_pos + 1, min(desired_cut_id + 50, input_ids.size(0))):
+                        if not _image_is_splitted(input_ids, safe_cut):
+                            logger.info(
+                                f"[PackedDataset] 📐 Found safe extended cut_id={safe_cut} "
+                                f"to preserve <lvr> tokens (avoiding image split)"
+                            )
+                            return safe_cut
+            
+            # Cannot extend safely, use default (will trigger lvr_tokens clearing)
+            logger.warning(
+                f"[PackedDataset] ⚠️ Cannot extend cut_id to preserve <lvr> tokens: "
+                f"first_lvr_pos={first_lvr_pos} > default_cut_id={default_cut_id}, "
+                f"desired_cut_id={desired_cut_id} > max_extended={max_extended_cut_id}"
+            )
+            return default_cut_id
+        
         '''
             Handles long single-/multi- instance buffer differently
         '''
@@ -993,7 +1198,12 @@ class PackedDataset(IterableDataset):
             if buffer['input_ids'].size(0) >= long_seq_threshold:
 
                 '''cut_id is the idx of the first token to be dropped'''
-                cut_id = min(max_tokens, buffer['input_ids'].size(0))
+                default_cut_id = min(max_tokens, buffer['input_ids'].size(0))
+                
+                # Try to find a better cut_id that preserves <lvr> tokens
+                cut_id = _find_lvr_aware_cut_id(
+                    buffer['input_ids'], default_cut_id, lvr_token_id, max_tokens
+                )
 
                 if not _image_is_splitted(buffer['input_ids'], cut_id):
                     # count discarded lvr tokens before slicing
@@ -1010,9 +1220,6 @@ class PackedDataset(IterableDataset):
                                 f"lvr_tokens_size={lvr_tokens_size}, num_discarded_lvr_tokens={num_discarded_lvr_tokens}, "
                                 f"cut_id={cut_id}. This would create empty lvr_tokens! Using full lvr_tokens instead."
                             )
-                            print(f"[SPLIT_BUFFER_INVALID_CUT] cut_id_lvr={cut_id_lvr}, lvr_tokens_size={lvr_tokens_size}, "
-                                  f"num_discarded_lvr_tokens={num_discarded_lvr_tokens}, cut_id={cut_id}, "
-                                  f"using_full_lvr_tokens=True", flush=True)
                             cut_id_lvr = lvr_tokens_size  # Use full lvr_tokens to avoid empty tensor
                     else:
                         # If lvr_token_id is None or lvr_tokens is empty, keep all lvr_tokens
@@ -1024,7 +1231,7 @@ class PackedDataset(IterableDataset):
                     for k in buffer:
                         if k in ['input_ids', 'labels', 'attention_mask', 'position_ids', 'data_index']:
                             buffer[k] = buffer[k][:cut_id]
-                        elif k in ['pixel_values', 'image_flags','image_grid_thw']:
+                        elif k in ['pixel_values', 'image_flags','image_grid_thw', 'cropped_bbox_images']:
                             buffer[k] = buffer[k]
                         elif k in ['lvr_tokens']:
                             # CRITICAL: After truncating input_ids, check if any <lvr> tokens remain
@@ -1037,8 +1244,6 @@ class PackedDataset(IterableDataset):
                                         f"[PackedDataset] ⚠️  After truncation, no <lvr> tokens found in input_ids "
                                         f"but lvr_tokens has {buffer[k][0].numel()} tokens. Discarding this buffer to avoid NaN loss."
                                     )
-                                    print(f"[SPLIT_BUFFER_DISCARD_BUFFER] cut_id={cut_id}, remaining_lvr_tokens=0, "
-                                          f"lvr_tokens_size={buffer[k][0].numel()}, discarding_buffer=True", flush=True)
                                     # Mark buffer for discard instead of clearing lvr_tokens
                                     should_discard_buffer = True
                                     lvr_tokens_cleared = True
@@ -1047,28 +1252,19 @@ class PackedDataset(IterableDataset):
                             if not lvr_tokens_cleared and cut_id_lvr is not None and len(buffer[k]) > 0:
                                 # CRITICAL: Log before slicing for debugging
                                 original_size = buffer[k][0].size(0)
-                                print(f"[SPLIT_BUFFER_BEFORE_SLICE] cut_id_lvr={cut_id_lvr}, original_size={original_size}, "
-                                      f"cut_id={cut_id}, num_discarded_lvr_tokens={num_discarded_lvr_tokens if 'num_discarded_lvr_tokens' in locals() else 'N/A'}", flush=True)
-                                
                                 # CRITICAL: Double-check before slicing to prevent empty tensor
                                 if cut_id_lvr > 0 and cut_id_lvr <= buffer[k][0].size(0):
                                     buffer[k][0] = buffer[k][0][:cut_id_lvr]
-                                    print(f"[SPLIT_BUFFER_AFTER_SLICE] cut_id_lvr={cut_id_lvr}, new_size={buffer[k][0].size(0)}, "
-                                          f"empty={buffer[k][0].numel() == 0}", flush=True)
                                 elif cut_id_lvr == 0:
                                     # If cut_id_lvr is 0, keep at least one token to avoid empty tensor
                                     logger.warning(
                                         f"[PackedDataset] ⚠️  cut_id_lvr=0 would create empty lvr_tokens, "
                                         f"keeping at least 1 token. Original size: {buffer[k][0].size(0)}"
                                     )
-                                    print(f"[SPLIT_BUFFER_KEEP_ONE_TOKEN] cut_id_lvr=0, keeping 1 token instead", flush=True)
                                     buffer[k][0] = buffer[k][0][:1] if buffer[k][0].size(0) > 0 else buffer[k][0]
-                                    print(f"[SPLIT_BUFFER_AFTER_KEEP_ONE] new_size={buffer[k][0].size(0)}, "
-                                          f"empty={buffer[k][0].numel() == 0}", flush=True)
                                 else:
                                     # If cut_id_lvr > buffer[k][0].size(0), keep full tensor
-                                    print(f"[SPLIT_BUFFER_KEEP_FULL] cut_id_lvr={cut_id_lvr} > original_size={original_size}, "
-                                          f"keeping full tensor", flush=True)
+                                    pass
                                 
                                 # CRITICAL: Final check - ensure tensor is not empty
                                 if buffer[k][0].numel() == 0:
@@ -1077,8 +1273,6 @@ class PackedDataset(IterableDataset):
                                         f"cut_id_lvr={cut_id_lvr}, original_size={original_size}, "
                                         f"cut_id={cut_id}. Discarding buffer to avoid NaN loss."
                                     )
-                                    print(f"[SPLIT_BUFFER_EMPTY_AFTER_SPLICE] cut_id_lvr={cut_id_lvr}, original_size={original_size}, "
-                                          f"discarding_buffer=True", flush=True)
                                     should_discard_buffer = True
                             # If cut_id_lvr is None, keep lvr_tokens as is
                         elif k in ['input_lengths']:
@@ -1089,21 +1283,21 @@ class PackedDataset(IterableDataset):
                         else:
                             raise NotImplementedError(f'find unsupported keys: {k} from {buffer.keys()}')
                     
-                    # CRITICAL: If lvr_tokens were cleared or became empty, discard this buffer
-                    # This prevents empty lvr_tokens from reaching the forward function
+                    # If lvr_tokens were cleared or became empty after truncation, clear them and continue
+                    # Forward function will handle empty lvr_tokens by returning zero loss for resampler
+                    # This avoids NCCL timeout caused by discarding buffer in distributed training
                     if should_discard_buffer:
-                        logger.error(
-                            f"[PackedDataset] ❌ CRITICAL: Discarding buffer due to empty lvr_tokens after truncation. "
-                            f"This prevents NaN loss. Buffer will be discarded and not added to buffer_ready."
+                        logger.warning(
+                            f"[PackedDataset] ⚠️ Empty lvr_tokens after truncation. "
+                            f"Clearing lvr_tokens and continuing (forward will return zero resampler loss)."
                         )
-                        print(f"[SPLIT_BUFFER_DISCARD_FINAL] discarding_buffer=True, buffer_not_added_to_ready=True", flush=True)
-                        buffer_ready = []
-                        buffer_unready = []
-                    else:
-                        # re-assign lengths
-                        buffer['input_lengths'][0] = buffer['input_ids'].size(0)
-                        buffer_ready = [buffer]
-                        buffer_unready = []
+                        # Clear lvr_tokens instead of discarding the entire buffer
+                        buffer['lvr_tokens'] = []
+                    
+                    # re-assign lengths and return buffer
+                    buffer['input_lengths'][0] = buffer['input_ids'].size(0)
+                    buffer_ready = [buffer]
+                    buffer_unready = []
                 else:   # if image is getting cut, discard the overlong instance
                     buffer_ready = []
                     buffer_unready = []
@@ -1134,7 +1328,6 @@ class PackedDataset(IterableDataset):
                                     f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens[{idx}] detected in condition 2.2! "
                                     f"Discarding buffer to avoid NaN loss."
                                 )
-                                print(f"[SPLIT_BUFFER_COND2_2_EMPTY_LVR] idx={idx}, discarding_buffer=True", flush=True)
                                 should_discard_buffer_multi = True
                                 break
                     # Check if input_ids has no <lvr> tokens but lvr_tokens has values
@@ -1148,16 +1341,19 @@ class PackedDataset(IterableDataset):
                                 f"[PackedDataset] ❌ CRITICAL: No <lvr> tokens in input_ids but lvr_tokens has values in condition 2.2! "
                                 f"Discarding buffer to avoid NaN loss."
                             )
-                            print(f"[SPLIT_BUFFER_COND2_2_MISMATCH] remaining_lvr_tokens=0, "
-                                  f"lvr_tokens_has_values=True, discarding_buffer=True", flush=True)
                             should_discard_buffer_multi = True
                 
+                # If should_discard_buffer_multi, clear lvr_tokens instead of discarding buffer
+                # This avoids NCCL timeout in distributed training
                 if should_discard_buffer_multi:
-                    buffer_ready = []
-                    buffer_unready = []
-                else:
-                    buffer_ready = [buffer]
-                    buffer_unready = []
+                    logger.warning(
+                        f"[PackedDataset] ⚠️ Empty/invalid lvr_tokens in condition 2.2. "
+                        f"Clearing lvr_tokens and continuing (forward will return zero resampler loss)."
+                    )
+                    buffer['lvr_tokens'] = []
+                
+                buffer_ready = [buffer]
+                buffer_unready = []
             # condition 2.3: otherwise
             else:
                 buffer_ready = []
@@ -1183,7 +1379,6 @@ class PackedDataset(IterableDataset):
                                         f"[PackedDataset] ❌ CRITICAL: Last lvr_tokens element is empty before split! "
                                         f"This should not happen!"
                                     )
-                                    print(f"[SPLIT_BUFFER_EMPTY_LVR] last_lvr_tokens_empty=True", flush=True)
                             buffer_right[k] = buffer[k][-1:]
                             buffer[k] = buffer[k][:-1]
                             
@@ -1196,7 +1391,6 @@ class PackedDataset(IterableDataset):
                                                 f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens[{idx}] detected after split! "
                                                 f"Using fallback token 0."
                                             )
-                                            print(f"[SPLIT_BUFFER_EMPTY_AFTER_SPLIT] idx={idx}, using_fallback_token_0=True", flush=True)
                                             # Use token 0 as fallback
                                             buffer[k][idx] = torch.tensor([0], dtype=torch.int)
                                 if len(buffer_right[k]) > 0:
@@ -1206,7 +1400,6 @@ class PackedDataset(IterableDataset):
                                                 f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens[{idx}] in buffer_right after split! "
                                                 f"Using fallback token 0."
                                             )
-                                            print(f"[SPLIT_BUFFER_RIGHT_EMPTY] idx={idx}, using_fallback_token_0=True", flush=True)
                                             # Use token 0 as fallback
                                             buffer_right[k][idx] = torch.tensor([0], dtype=torch.int)
                         elif k.startswith('_debug_'):
@@ -1221,20 +1414,15 @@ class PackedDataset(IterableDataset):
                                 buffer_right[k] = buffer[k]
                         else:
                             raise NotImplementedError(f'find unsupported keys: {k} from {buffer.keys()}')
-                    # CRITICAL: Check if lvr_tokens are empty before adding to buffer_ready
-                    # Check left buffer
-                    left_buffer_valid = True
+                    # Check left buffer - if invalid lvr_tokens, clear them instead of discarding
+                    # This avoids NCCL timeout in distributed training
                     if 'lvr_tokens' in buffer and lvr_token_id is not None:
                         remaining_lvr_tokens_left = (buffer['input_ids'] == lvr_token_id).sum().item()
+                        left_buffer_invalid = False
                         if len(buffer['lvr_tokens']) > 0:
                             for idx, lvr_token_group in enumerate(buffer['lvr_tokens']):
                                 if isinstance(lvr_token_group, torch.Tensor) and lvr_token_group.numel() == 0:
-                                    left_buffer_valid = False
-                                    logger.error(
-                                        f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens[{idx}] in left buffer after split in condition 2.3! "
-                                        f"Discarding buffer."
-                                    )
-                                    print(f"[SPLIT_BUFFER_COND2_3_LEFT_EMPTY] idx={idx}, discarding_left_buffer=True", flush=True)
+                                    left_buffer_invalid = True
                                     break
                         if remaining_lvr_tokens_left == 0 and len(buffer['lvr_tokens']) > 0:
                             has_non_empty_lvr = any(
@@ -1242,26 +1430,23 @@ class PackedDataset(IterableDataset):
                                 for t in buffer['lvr_tokens']
                             )
                             if has_non_empty_lvr:
-                                left_buffer_valid = False
-                                logger.error(
-                                    f"[PackedDataset] ❌ CRITICAL: No <lvr> tokens in left buffer input_ids but lvr_tokens has values! "
-                                    f"Discarding buffer."
-                                )
-                                print(f"[SPLIT_BUFFER_COND2_3_LEFT_MISMATCH] discarding_left_buffer=True", flush=True)
+                                left_buffer_invalid = True
+                        
+                        if left_buffer_invalid:
+                            logger.warning(
+                                f"[PackedDataset] ⚠️ Invalid lvr_tokens in left buffer (condition 2.3). "
+                                f"Clearing lvr_tokens (forward will return zero resampler loss)."
+                            )
+                            buffer['lvr_tokens'] = []
                     
-                    # Check right buffer
-                    right_buffer_valid = True
+                    # Check right buffer - if invalid lvr_tokens, clear them instead of discarding
                     if 'lvr_tokens' in buffer_right and lvr_token_id is not None:
                         remaining_lvr_tokens_right = (buffer_right['input_ids'] == lvr_token_id).sum().item()
+                        right_buffer_invalid = False
                         if len(buffer_right['lvr_tokens']) > 0:
                             for idx, lvr_token_group in enumerate(buffer_right['lvr_tokens']):
                                 if isinstance(lvr_token_group, torch.Tensor) and lvr_token_group.numel() == 0:
-                                    right_buffer_valid = False
-                                    logger.error(
-                                        f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens[{idx}] in right buffer after split in condition 2.3! "
-                                        f"Discarding buffer."
-                                    )
-                                    print(f"[SPLIT_BUFFER_COND2_3_RIGHT_EMPTY] idx={idx}, discarding_right_buffer=True", flush=True)
+                                    right_buffer_invalid = True
                                     break
                         if remaining_lvr_tokens_right == 0 and len(buffer_right['lvr_tokens']) > 0:
                             has_non_empty_lvr = any(
@@ -1269,35 +1454,31 @@ class PackedDataset(IterableDataset):
                                 for t in buffer_right['lvr_tokens']
                             )
                             if has_non_empty_lvr:
-                                right_buffer_valid = False
-                                logger.error(
-                                    f"[PackedDataset] ❌ CRITICAL: No <lvr> tokens in right buffer input_ids but lvr_tokens has values! "
-                                    f"Discarding buffer."
-                                )
-                                print(f"[SPLIT_BUFFER_COND2_3_RIGHT_MISMATCH] discarding_right_buffer=True", flush=True)
+                                right_buffer_invalid = True
+                        
+                        if right_buffer_invalid:
+                            logger.warning(
+                                f"[PackedDataset] ⚠️ Invalid lvr_tokens in right buffer (condition 2.3). "
+                                f"Clearing lvr_tokens (forward will return zero resampler loss)."
+                            )
+                            buffer_right['lvr_tokens'] = []
                     
-                    # if left buffer is longer
+                    # Always append buffers (lvr_tokens already cleared if invalid)
                     if buffer['input_ids'].size(0) >= buffer_right['input_ids'].size(0):
-                        if left_buffer_valid:
-                            buffer_ready.append(buffer)
+                        buffer_ready.append(buffer)
                         buffer = buffer_right
                     else:   # buffer_right is longer than the accumulated left
-                        if right_buffer_valid:
-                            buffer_ready.append(buffer_right)
+                        buffer_ready.append(buffer_right)
 
-                # CRITICAL: Check final buffer before adding to buffer_unready
-                final_buffer_valid = True
+                # Check final buffer - if invalid lvr_tokens, clear them instead of discarding
+                # This avoids NCCL timeout in distributed training
                 if 'lvr_tokens' in buffer and lvr_token_id is not None:
                     remaining_lvr_tokens_final = (buffer['input_ids'] == lvr_token_id).sum().item()
+                    final_buffer_invalid = False
                     if len(buffer['lvr_tokens']) > 0:
                         for idx, lvr_token_group in enumerate(buffer['lvr_tokens']):
                             if isinstance(lvr_token_group, torch.Tensor) and lvr_token_group.numel() == 0:
-                                final_buffer_valid = False
-                                logger.error(
-                                    f"[PackedDataset] ❌ CRITICAL: Empty lvr_tokens[{idx}] in final buffer in condition 2.3! "
-                                    f"Discarding buffer."
-                                )
-                                print(f"[SPLIT_BUFFER_COND2_3_FINAL_EMPTY] idx={idx}, discarding_final_buffer=True", flush=True)
+                                final_buffer_invalid = True
                                 break
                     if remaining_lvr_tokens_final == 0 and len(buffer['lvr_tokens']) > 0:
                         has_non_empty_lvr = any(
@@ -1305,16 +1486,17 @@ class PackedDataset(IterableDataset):
                             for t in buffer['lvr_tokens']
                         )
                         if has_non_empty_lvr:
-                            final_buffer_valid = False
-                            logger.error(
-                                f"[PackedDataset] ❌ CRITICAL: No <lvr> tokens in final buffer input_ids but lvr_tokens has values! "
-                                f"Discarding buffer."
-                            )
-                            print(f"[SPLIT_BUFFER_COND2_3_FINAL_MISMATCH] discarding_final_buffer=True", flush=True)
+                            final_buffer_invalid = True
+                    
+                    if final_buffer_invalid:
+                        logger.warning(
+                            f"[PackedDataset] ⚠️ Invalid lvr_tokens in final buffer (condition 2.3). "
+                            f"Clearing lvr_tokens (forward will return zero resampler loss)."
+                        )
+                        buffer['lvr_tokens'] = []
                 
-                # if buffer['input_ids'].size(0) <= max_tokens and PackedDataset.check_valid(buffer):
-                if final_buffer_valid:
-                    buffer_unready.append(buffer)
+                # Always append buffer (lvr_tokens already cleared if invalid)
+                buffer_unready.append(buffer)
 
         return buffer_ready, buffer_unready
 
@@ -1486,6 +1668,7 @@ class PackedDataCollatorForSupervisedDatasetLVR(object):
         all_lvr_tokens = []
         all_pixel_values = []
         all_image_grid_thw = []
+        all_cropped_bbox_images = []
         
         # Collect debug information
         all_debug_questions = []
@@ -1503,6 +1686,8 @@ class PackedDataCollatorForSupervisedDatasetLVR(object):
             all_lvr_tokens.extend(feature['lvr_tokens'])
             all_pixel_values.append(feature['pixel_values'])
             all_image_grid_thw.append(feature['image_grid_thw'])
+            if 'cropped_bbox_images' in feature and feature['cropped_bbox_images'] is not None:
+                all_cropped_bbox_images.append(feature['cropped_bbox_images'])
             
             # Extract debug information if available
             if '_debug_question' in feature:
@@ -1548,18 +1733,22 @@ class PackedDataCollatorForSupervisedDatasetLVR(object):
             "lvr_tokens": all_lvr_tokens,
             "pixel_values": torch.cat(all_pixel_values),
             "image_grid_thw": torch.cat(all_image_grid_thw),
-            }
+        }
+        if all_cropped_bbox_images:
+            data_dict["cropped_bbox_images"] = torch.cat(all_cropped_bbox_images, dim=0)
         
         # Add debug information if available
+        # CRITICAL: Convert to simple strings to prevent RecursionError in pin_memory
+        # pin_memory recursively processes nested lists, deep nesting causes stack overflow
         if all_debug_questions:
-            data_dict['_debug_question'] = all_debug_questions
+            data_dict['_debug_question'] = str(all_debug_questions)[:2000]  # Truncate to avoid memory issues
         if all_debug_answers:
-            data_dict['_debug_answer'] = all_debug_answers
+            data_dict['_debug_answer'] = str(all_debug_answers)[:2000]
         if all_debug_image_paths:
-            data_dict['_debug_image_paths'] = all_debug_image_paths
+            data_dict['_debug_image_paths'] = str(all_debug_image_paths)[:2000]
         if all_debug_bboxes:
-            data_dict['_debug_bboxes'] = all_debug_bboxes
+            data_dict['_debug_bboxes'] = str(all_debug_bboxes)[:2000]
         if all_debug_data_indices:
-            data_dict['_debug_data_idx'] = all_debug_data_indices
+            data_dict['_debug_data_idx'] = str(all_debug_data_indices)[:500]
         
         return data_dict

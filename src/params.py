@@ -25,11 +25,14 @@ class ModelArguments:
     gfr_use_output_norm: bool = field(default=True, metadata={"help": "Whether to use output normalization for GFR head"})
     latent_end_token: bool = field(default=False)
     max_lvr_tokens: int = field(default=None)
-    # QLoRA quantization settings
-    use_qlora: bool = field(default=False, metadata={"help": "Use QLoRA 4-bit quantization to reduce memory usage"})
-    qlora_bits: int = field(default=4, metadata={"help": "Bits for QLoRA quantization (4 or 8)"})
-    qlora_quant_type: str = field(default="nf4", metadata={"help": "Quantization type: nf4 or fp4"})
-    qlora_double_quant: bool = field(default=True, metadata={"help": "Use double quantization for QLoRA"})
+    use_box_feature_resampler: bool = field(default=False, metadata={"help": "Use BoxFeatureResampler for fixed 8 latent tokens MSE target"})
+    num_latent_tokens: int = field(default=8, metadata={"help": "Number of fixed latent tokens per bbox for resampler loss"})
+    use_dit_reconstruction: bool = field(default=False, metadata={"help": "Use DiT-XL-2 pixel reconstruction head conditioned on LLM 8 tokens"})
+    dit_pretrained_path: Optional[str] = field(default=None, metadata={"help": "Path to pretrained DiT-XL-2 weights (.pt file, e.g. DiT-XL-2-256x256.pt)"})
+    dit_vae_repo: str = field(default="stabilityai/sd-vae-ft-mse", metadata={"help": "VAE repo for DiT reconstruction"})
+    dit_hidden_size: int = field(default=1152, metadata={"help": "DiT hidden size (DiT-XL-2 uses 1152)"})
+    dit_num_latent_tokens: int = field(default=8, metadata={"help": "Number of LLM tokens used as DiT condition per bbox"})
+    # Attention isolation parameters
 
 
 @dataclass
@@ -42,6 +45,13 @@ class TrainingArguments(HFTrainingArguments):
 
     loss_lvr_fct: str = field(default="mse")
     loss_lvr_lambda: float = field(default=1e-1)
+    loss_lvr_resampler_lambda: float = field(default=1e-1, metadata={"help": "Weight for MSE loss between LLM latent tokens and BoxFeatureResampler target"})
+    loss_dit_recon_lambda: float = field(default=0.1, metadata={"help": "Weight for DiT pixel reconstruction loss"})
+    dit_num_inference_steps: int = field(default=20, metadata={"help": "Number of denoising steps for DiT at inference"})
+    dit_condition_gt_prob: float = field(default=0.5, metadata={"help": "Probability of using Resampler GT tokens (instead of LLM tokens) as DiT condition during training. 0.0=always LLM, 1.0=always GT, 0.5=50/50"})
+
+    # Loss control flags - enable/disable specific losses
+    use_mse_loss: bool = field(default=True, metadata={"help": "Whether to compute and use MSE/LVR reconstruction loss"})
 
     freeze_vision_tower: bool = field(default=False)
     freeze_llm: bool = field(default=False)
@@ -56,18 +66,6 @@ class TrainingArguments(HFTrainingArguments):
         },
     )
 
-    double_quant: bool = field(
-        default=True,
-        metadata={"help": "Compress the quantization statistics through double quantization."}
-    )
-    quant_type: str = field(
-        default="nf4",
-        metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
-    )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
     lora_enable: bool = False
     vision_lora: bool = False
     use_dora: bool = False
@@ -97,6 +95,7 @@ class TrainingArguments(HFTrainingArguments):
     mode_switch_loss: Optional[bool] = False
     loss_mode_switch_fct: Optional[str] = field(default="mse")
     loss_mode_switch_lambda:Optional[float] = field(default=1e-1)
+    
 
 
 @dataclass
@@ -111,18 +110,6 @@ class GRPOArguments(GRPOConfigTRL):
     freeze_llm: bool = field(default=False)
     freeze_merger: bool = field(default=False)
     disable_flash_attn2: bool = field(default=False)
-    double_quant: bool = field(
-        default=True,
-        metadata={"help": "Compress the quantization statistics through double quantization."}
-    )
-    quant_type: str = field(
-        default="nf4",
-        metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."}
-    )
-    bits: int = field(
-        default=16,
-        metadata={"help": "How many bits to use."}
-    )
     lora_enable: bool = False
     vision_lora: bool = False
     use_dora: bool = False
@@ -174,4 +161,5 @@ class DataArguments:
     video_resized_height: int = field(default=None)
     fps: float = 1.0
     random_seed: Optional[int] = field(default=None)
-    
+    fixed_num_of_lvr_tokens: Optional[int] = field(default=None, metadata={"help": "Fixed number of <lvr> tokens per bbox (e.g. 8 for BoxFeatureResampler). If set, template uses this many tokens + optional latent_end."})
+    dit_crop_size: int = field(default=128, metadata={"help": "Bbox crop size for DiT reconstruction (128->16x16 latent, 256->32x32 latent). Smaller = faster training + less memory."})

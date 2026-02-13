@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:hgx:8 # A800
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/stage1_7b_b4_lvr0.01_steps2500_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/baseline_SFT_7b_b4_ce_steps2500_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
@@ -21,6 +21,7 @@ NUM_DEVICES=$(echo "$GPU_IDS" | tr ',' '\n' | wc -l)
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 export WANDB_MODE="${WANDB_MODE:-online}"
+export WANDB_API_KEY=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
 export WANDB_PROJECT="${WANDB_PROJECT:-Dynamic-Coconut}"
 
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
@@ -39,15 +40,26 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
 MAX_STEPS=2500
 LR=1e-5
 LVR_HEAD=False
+
+# Loss control
+USE_MSE_LOSS="${USE_MSE_LOSS:-True}"  # Enable MSE/reconstruction loss (default: True for LVR baseline)
 LVR_LOSS_FCT=mse
-LAMBDA_LVR=0.01
+LAMBDA_LVR=0.1
+
 MAX_TOKEN=5120
 MIN_TOKEN=128
-RUN_NAME="Stage1_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}-MaxVisToken${MAX_TOKEN}-MinVisToken${MIN_TOKEN}"
-OUTPUT_DIR="result/stage1_checkpoints_7b/${RUN_NAME}/"
+RUN_NAME="SFT_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}_acc${GRAD_ACCUM_STEPS}_MSE${USE_MSE_LOSS}_resample"
+OUTPUT_DIR="result/no_head/${RUN_NAME}/"
+
+# 如果需要从已有 checkpoint 继续训练，请在提交前设置 CHECKPOINT_PATH，例如：
+# CHECKPOINT_PATH="/comp_robot/zhoujiazhou/projects/Active-Coconut/result/no_head/SFT_steps2500_b4_mseLVR0.1_acc8_MSETrue_resample/checkpoint-1800" sbatch scripts/sbatch/sft_7b.sh
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/no_head/SFT_steps2500_b4_mseLVR0.1_acc8_MSETrue_resample/checkpoint-1800}"
 
 mkdir -p logs "$OUTPUT_DIR"
 MASTER_PORT="${MASTER_PORT:-29500}"
+
+CHECKPOINT_ARGS=""
+[ -n "$CHECKPOINT_PATH" ] && CHECKPOINT_ARGS="--checkpoint_name $CHECKPOINT_PATH --resume_from_checkpoint $CHECKPOINT_PATH"
 
 deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --run_name "$RUN_NAME" \
@@ -64,10 +76,12 @@ deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --max_steps $MAX_STEPS \
     --learning_rate $LR \
     --loss_lvr_lambda $LAMBDA_LVR \
+    --use_mse_loss $USE_MSE_LOSS \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
     --output_dir "$OUTPUT_DIR" \
+    $CHECKPOINT_ARGS \
     --num_train_epochs 1 \
     --per_device_train_batch_size $BATCH_PER_DEVICE \
     --gradient_accumulation_steps $GRAD_ACCUM_STEPS \
@@ -97,16 +111,18 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Training completed. Starting evaluation..."
-CHECKPOINT_PATH="${PWD}/${OUTPUT_DIR}/checkpoint-${MAX_STEPS}"
+# evaluation_7b_SFT_all_ck.sh discovers all checkpoints under BASE_CHECKPOINT_DIR (not CHECKPOINT_PATH)
+BASE_CHECKPOINT_DIR="${PWD}/${OUTPUT_DIR}"
+CHECKPOINT_PATH="${BASE_CHECKPOINT_DIR}/checkpoint-${MAX_STEPS}"
 
-# Use latest checkpoint if final checkpoint doesn't exist
+# Use latest checkpoint if final checkpoint doesn't exist (for existence check only)
 [ ! -d "$CHECKPOINT_PATH" ] && \
-    CHECKPOINT_PATH=$(find "${PWD}/${OUTPUT_DIR}" -maxdepth 1 -type d -name "checkpoint-*" | sort -V | tail -n 1)
+    CHECKPOINT_PATH=$(find "$BASE_CHECKPOINT_DIR" -maxdepth 1 -type d -name "checkpoint-*" | sort -V | tail -n 1)
 
 if [ -d "$CHECKPOINT_PATH" ]; then
-    export CHECKPOINT_PATH DATASET_CONFIG
+    export BASE_CHECKPOINT_DIR CHECKPOINT_PATH DATASET_CONFIG
     export EVAL_STEP_LIST="${EVAL_STEP_LIST:-4}"
-    bash "${PWD}/scripts/evaluation/evaluation_7b_sbatch.sh" || echo "Warning: Evaluation failed"
+    bash "${PWD}/scripts/evaluation/evaluation_7b_SFT_all_ck.sh" || echo "Warning: Evaluation failed"
 else
     echo "Warning: No checkpoint found. Skipping evaluation."
 fi

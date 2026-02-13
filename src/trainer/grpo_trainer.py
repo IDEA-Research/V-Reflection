@@ -284,10 +284,9 @@ class QwenGRPOTrainer(Trainer):
         temp_folder=None,
         oci_handler=None,
     ):
-        if oci_handler:
-            self.oci_handler = oci_handler
-            self.temp_folder = temp_folder     # temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
-
+        # Initialize temp_folder and oci_handler (may be None if not using online checkpointing)
+        self.temp_folder = temp_folder     # temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
+        self.oci_handler = oci_handler
         
         if args is None:
             model_name = model if isinstance(model, str) else model.config._name_or_path
@@ -679,6 +678,62 @@ class QwenGRPOTrainer(Trainer):
         # Simple pass-through, just like original
         return inputs
     
+    def _clean_prompts(self, prompts):
+        """
+        Clean prompts by removing None values from content.
+        This prevents AttributeError when process_vision_info tries to process None values.
+        """
+        cleaned_prompts = []
+        for prompt in prompts:
+            if isinstance(prompt, list):
+                # OpenAI chat format: list of messages
+                cleaned_prompt = []
+                for message in prompt:
+                    if isinstance(message, dict) and "content" in message:
+                        content = message["content"]
+                        if isinstance(content, list):
+                            # Filter out None values and dictionary items with None image/video fields
+                            cleaned_content = []
+                            for item in content:
+                                if item is None:
+                                    continue  # Skip None items
+                                elif isinstance(item, dict):
+                                    # Check if it's a vision item (image/video) with None or missing value
+                                    # Skip items with None image/video or missing image/video keys for vision types
+                                    item_type = item.get("type", "")
+                                    if item_type == "image":
+                                        # For image type, check if image field is None or missing
+                                        if "image" not in item or item.get("image") is None:
+                                            continue  # Skip items with None or missing image
+                                    elif item_type == "video":
+                                        # For video type, check if video field is None or missing
+                                        if "video" not in item or item.get("video") is None:
+                                            continue  # Skip items with None or missing video
+                                    else:
+                                        # For non-vision types, check if image/video keys exist and are None
+                                        if "image" in item and item["image"] is None:
+                                            continue  # Skip items with None image
+                                        if "video" in item and item["video"] is None:
+                                            continue  # Skip items with None video
+                                    cleaned_content.append(item)
+                                else:
+                                    cleaned_content.append(item)
+                            
+                            # Only add message if content is not empty after cleaning
+                            if cleaned_content:
+                                cleaned_message = {**message, "content": cleaned_content}
+                                cleaned_prompt.append(cleaned_message)
+                            # If content becomes empty, skip the entire message
+                        else:
+                            # Content is a string, keep as is
+                            cleaned_prompt.append(message)
+                    else:
+                        cleaned_prompt.append(message)
+                cleaned_prompts.append(cleaned_prompt)
+            else:
+                cleaned_prompts.append(prompt)
+        return cleaned_prompts
+    
     '''
         This function has been adapted to LVR models
     '''
@@ -690,9 +745,30 @@ class QwenGRPOTrainer(Trainer):
 
         prompts = [x["prompt"] for x in inputs]
         
+        # Clean prompts to remove None values that could cause AttributeError in process_vision_info
+        cleaned_prompts = self._clean_prompts(prompts)
+        
+        # Update inputs with cleaned prompts to ensure consistency
+        for i, input_item in enumerate(inputs):
+            input_item["prompt"] = cleaned_prompts[i]
+        
         prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        
+        # Use cleaned prompts for vision processing
+        prompts = cleaned_prompts
 
-        image_inputs, video_inputs, video_kwargs = process_vision_info(prompts, return_video_kwargs=True)
+        # Process vision info with error handling for edge cases
+        try:
+            image_inputs, video_inputs, video_kwargs = process_vision_info(prompts, return_video_kwargs=True)
+        except (AttributeError, TypeError) as e:
+            # If process_vision_info fails due to None values, log and provide fallback
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error in process_vision_info (likely None image/video): {e}. Using empty vision inputs.")
+            # Fallback: create empty vision inputs matching the batch size
+            image_inputs = [[] for _ in prompts]
+            video_inputs = [[] for _ in prompts]
+            video_kwargs = {}
 
         prompt_inputs = self.processing_class(
             text = prompts_text,
@@ -1247,7 +1323,7 @@ class QwenGRPOTrainer(Trainer):
             self._push_from_checkpoint(output_dir)
 
         # output_dir is local; now we save to cloud if needed
-        if self.temp_folder:
+        if self.temp_folder and self.oci_handler:
             remote_chkpt_folder = os.path.join(self.args.remote_output_dir,checkpoint_folder)
             if remote_chkpt_folder[0] == '/':
                 remote_chkpt_folder = remote_chkpt_folder[1:]       #remote pathing rules will take bucket//checkpoints, need to remove the dup
