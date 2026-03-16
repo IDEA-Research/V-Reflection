@@ -26,12 +26,9 @@ class ModelArguments:
     latent_end_token: bool = field(default=False)
     max_lvr_tokens: int = field(default=None)
     use_box_feature_resampler: bool = field(default=False, metadata={"help": "Use BoxFeatureResampler for fixed 8 latent tokens MSE target"})
+    use_stage2_distillation: bool = field(default=False, metadata={"help": "Stage 2: Teacher-Student distillation with DynamicAutoregressiveResampler (requires use_box_feature_resampler)"})
+    use_stage3_e2e: bool = field(default=False, metadata={"help": "Stage 3: End-to-end reasoning unlock. CE loss only, no distillation. DAR in forward path for gradient flow."})
     num_latent_tokens: int = field(default=8, metadata={"help": "Number of fixed latent tokens per bbox for resampler loss"})
-    use_dit_reconstruction: bool = field(default=False, metadata={"help": "Use DiT-XL-2 pixel reconstruction head conditioned on LLM 8 tokens"})
-    dit_pretrained_path: Optional[str] = field(default=None, metadata={"help": "Path to pretrained DiT-XL-2 weights (.pt file, e.g. DiT-XL-2-256x256.pt)"})
-    dit_vae_repo: str = field(default="stabilityai/sd-vae-ft-mse", metadata={"help": "VAE repo for DiT reconstruction"})
-    dit_hidden_size: int = field(default=1152, metadata={"help": "DiT hidden size (DiT-XL-2 uses 1152)"})
-    dit_num_latent_tokens: int = field(default=8, metadata={"help": "Number of LLM tokens used as DiT condition per bbox"})
     # Attention isolation parameters
 
 
@@ -46,9 +43,10 @@ class TrainingArguments(HFTrainingArguments):
     loss_lvr_fct: str = field(default="mse")
     loss_lvr_lambda: float = field(default=1e-1)
     loss_lvr_resampler_lambda: float = field(default=1e-1, metadata={"help": "Weight for MSE loss between LLM latent tokens and BoxFeatureResampler target"})
-    loss_dit_recon_lambda: float = field(default=0.1, metadata={"help": "Weight for DiT pixel reconstruction loss"})
-    dit_num_inference_steps: int = field(default=20, metadata={"help": "Number of denoising steps for DiT at inference"})
-    dit_condition_gt_prob: float = field(default=0.5, metadata={"help": "Probability of using Resampler GT tokens (instead of LLM tokens) as DiT condition during training. 0.0=always LLM, 1.0=always GT, 0.5=50/50"})
+    loss_ortho_lambda: float = field(default=0.1, metadata={"help": "Weight for orthogonality loss of BoxFeatureResampler queries (Stage 1 only)"})
+    loss_attn_lambda: float = field(default=0.5, metadata={"help": "Weight for Stage 2 guided attention loss (penalize attention on background)"})
+    loss_attn_transfer_lambda: float = field(default=1.0, metadata={"help": "Weight for Stage 2 pixel-level attention distillation (KL divergence)"})
+    loss_attn_div_lambda: float = field(default=10.0, metadata={"help": "Weight for attention divergence loss (Stage 1 BoxFeatureResampler)"})
 
     # Loss control flags - enable/disable specific losses
     use_mse_loss: bool = field(default=True, metadata={"help": "Whether to compute and use MSE/LVR reconstruction loss"})
@@ -162,4 +160,3 @@ class DataArguments:
     fps: float = 1.0
     random_seed: Optional[int] = field(default=None)
     fixed_num_of_lvr_tokens: Optional[int] = field(default=None, metadata={"help": "Fixed number of <lvr> tokens per bbox (e.g. 8 for BoxFeatureResampler). If set, template uses this many tokens + optional latent_end."})
-    dit_crop_size: int = field(default=128, metadata={"help": "Bbox crop size for DiT reconstruction (128->16x16 latent, 256->32x32 latent). Smaller = faster training + less memory."})

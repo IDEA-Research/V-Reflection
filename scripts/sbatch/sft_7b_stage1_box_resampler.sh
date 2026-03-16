@@ -1,8 +1,7 @@
 #!/bin/bash
-# SFT with DiT-S/8 pixel reconstruction head: Latent Diffusion training.
-# Training: bbox crop -> VAE encode -> scale latent -> add noise -> DiT predict noise (conditioned on LLM 8 tokens) -> MSE(noise_pred, noise) in latent space.
-# Inference: pure noise -> DDIM denoising (conditioned on LLM 8 tokens) -> scale latent -> VAE decode -> image.
-# Uses use_box_feature_resampler + fixed 8 latent tokens so sequence has 8 slots per bbox; DiT uses those 8 LLM tokens as condition.
+# SFT with BoxFeatureResampler: fixed N latent tokens per bbox, MSE(LLM_N, target.detach()).
+# BoxFeatureResampler is independent of LVR head: use LVR_HEAD=False (no intrinsic-similarity/other head).
+# Uses fixed_num_of_lvr_tokens=8 (no latent_end_token / loss_mode_switch / lvr_latent_end_emb).
 #SBATCH --partition=cvr
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8
@@ -10,7 +9,7 @@
 #SBATCH --gres=gpu:hgx:8
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_b4_dit_recon_v2_resize_256_pretrained_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_box_resampler_b4_latent8_lr1e6_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
@@ -30,6 +29,7 @@ export WANDB_API_KEY=wandb_v1_KFUlS0JVtbj5SFdCGHmqhd7ZhxZ_5cvkiNfSql5KNTfgBf6boQ
 export WANDB_PROJECT="${WANDB_PROJECT:-Dynamic-Coconut}"
 
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
+# MODEL_NAME="Qwen/Qwen3.0-VL-8B-Instruct"
 DATA_PACKING=True
 LST=4096
 MAX_INSTANCE_PER_BATCH=4
@@ -44,57 +44,38 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
 
 MAX_STEPS=2500
 LR=1e-5
+# LVR head disabled: only BoxFeatureResampler loss
 LVR_HEAD=False
+# LVR_HEAD_TYPE 仅在 LVR_HEAD=True 时需要设置，否则脚本不会传 --lvr_head_type
 
-# BoxFeatureResampler: 8 latent slots per bbox (same as DiT condition length)
+# BoxFeatureResampler: GT box tokens -> resampler -> 8 tokens; sequence has 8 latent slots per bbox.
 USE_BOX_FEATURE_RESAMPLER=True
 NUM_LATENT_TOKENS=8
 LATENT_END_TOKEN=False
-LOSS_LVR_RESAMPLER_LAMBDA=0.1
-LOSS_MODE_SWITCH_LAMBDA=0
+LOSS_LVR_RESAMPLER_LAMBDA=0.5
 
-# DiT pixel reconstruction head (Latent Diffusion)
-# Training: predicts noise in latent space, no VAE decode during training
-# Inference: uses DDIMScheduler for fast sampling (default 20 steps)
-USE_DIT_RECONSTRUCTION=True
-# Note: Currently no compatible DiT-S/8 pretrained weights available on HF
-# Leave empty to train from scratch (recommended)
-DIT_PRETRAINED_PATH="${DIT_PRETRAINED_PATH:-/comp_robot/zhoujiazhou/projects/Active-Coconut/data/DiT-XL-2-256x256.pt}"  # Empty by default - train from scratch
-LOSS_DIT_RECON_LAMBDA=1.0  # Loss weight for latent space noise prediction MSE
-DIT_NUM_INFERENCE_STEPS=20  # DDIM inference steps (faster than DDPM)
-# 50/50 GT condition: probability of using Resampler GT tokens instead of LLM tokens as DiT condition
-# Helps DiT learn denoising with clean condition signal. 0.0=always LLM, 1.0=always GT, 0.5=50/50
-DIT_CONDITION_GT_PROB="${DIT_CONDITION_GT_PROB:-0.5}"
-DIT_CROP_SIZE="${DIT_CROP_SIZE:-128}"  # Bbox crop size: 128->16x16 latent (faster), 256->32x32 latent
-
-# Loss control
+# Loss control (original design: Total Loss = loss_ce + lambda_resampler * loss_lvr_resampler)
 USE_MSE_LOSS=True
 LVR_LOSS_FCT=mse
-LAMBDA_LVR=0.1
 
 MAX_TOKEN=5120
 MIN_TOKEN=128
 
-RUN_NAME="SFT_dit_recon_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_dit${LOSS_DIT_RECON_LAMBDA}_resampler${LOSS_LVR_RESAMPLER_LAMBDA}_acc${GRAD_ACCUM_STEPS}_LATENT${NUM_LATENT_TOKENS}"
-OUTPUT_DIR="result/dit_recon/${RUN_NAME}/"
-# DiT 生成图片保存目录（推理时保存，训练时不进行 VAE decode）
-export DIT_SAVE_DIR="${DIT_SAVE_DIR:-${PWD}/${OUTPUT_DIR}generated_images}"
+RUN_NAME="SFT_box_resampler_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_resampler${LOSS_LVR_RESAMPLER_LAMBDA}_acc${GRAD_ACCUM_STEPS}_latent${NUM_LATENT_TOKENS}_lr${LR}"
+OUTPUT_DIR="result/box_resampler/${RUN_NAME}/"
 
 # 如果需要从已有 checkpoint 继续训练，请在提交前设置 CHECKPOINT_PATH，例如：
-# CHECKPOINT_PATH=\"/comp_robot/zhoujiazhou/projects/Active-Coconut/result/box_resampler/SFT_box_resampler_steps2500_b4_LVR0.1_resampler0.1_acc8/checkpoint-1800\" sbatch scripts/sbatch/sft_7b_box_resampler.sh
+# CHECKPOINT_PATH=\"/comp_robot/zhoujiazhou/projects/Active-Coconut/result/box_resampler/SFT_box_resampler_steps2500_b4_resampler0.1_acc8_latent8/checkpoint-1800\" sbatch scripts/sbatch/sft_7b_stage1_box_resampler.sh
 CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
 
 mkdir -p logs "$OUTPUT_DIR"
 export WANDB_RUN_NAME="$RUN_NAME"
 MASTER_PORT="${MASTER_PORT:-29500}"
+# 仅当 LVR_HEAD=True 时传 --lvr_head_type，避免 LVR_HEAD=False 时还要无意义地指定 type
 [ "$LVR_HEAD" = "True" ] && LVR_HEAD_TYPE_ARG="--lvr_head_type ${LVR_HEAD_TYPE:-simple}" || LVR_HEAD_TYPE_ARG=""
-
-DIT_PRETRAINED_ARG=""
-[ -n "$DIT_PRETRAINED_PATH" ] && DIT_PRETRAINED_ARG="--dit_pretrained_path \"$DIT_PRETRAINED_PATH\""
 
 CHECKPOINT_ARGS=""
 [ -n "$CHECKPOINT_PATH" ] && CHECKPOINT_ARGS="--checkpoint_name $CHECKPOINT_PATH --resume_from_checkpoint $CHECKPOINT_PATH"
-
 
 DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --run_name \"$RUN_NAME\" \
@@ -109,19 +90,11 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --use_box_feature_resampler $USE_BOX_FEATURE_RESAMPLER \
     --num_latent_tokens $NUM_LATENT_TOKENS \
     --loss_lvr_resampler_lambda $LOSS_LVR_RESAMPLER_LAMBDA \
-    --loss_mode_switch_lambda $LOSS_MODE_SWITCH_LAMBDA \
-    --use_dit_reconstruction $USE_DIT_RECONSTRUCTION \
-    $DIT_PRETRAINED_ARG \
-    --loss_dit_recon_lambda $LOSS_DIT_RECON_LAMBDA \
-    --dit_num_inference_steps $DIT_NUM_INFERENCE_STEPS \
-    --dit_condition_gt_prob $DIT_CONDITION_GT_PROB \
-    --dit_crop_size $DIT_CROP_SIZE \
     --freeze_vision_tower True \
     --freeze_merger True \
     --freeze_llm False \
     --max_steps $MAX_STEPS \
     --learning_rate $LR \
-    --loss_lvr_lambda $LAMBDA_LVR \
     --use_mse_loss $USE_MSE_LOSS \
     --bf16 True \
     --fp16 False \
@@ -159,8 +132,12 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Training completed. Starting evaluation of all checkpoints..."
+# 使用本次训练的保存目录作为评估的 checkpoint 根目录，对所有 ck 跑一遍评估
 export BASE_CHECKPOINT_DIR="${PWD}/${OUTPUT_DIR}"
+# 可选：与训练保持一致的数据配置
 export DATASET_CONFIG="${DATASET_CONFIG:-default}"
+# 指定测试集: BLINK, MMVP, VSTAR, POPE
+export EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-BLINK, MMVP, VSTAR, POPE}"
 bash /comp_robot/zhoujiazhou/projects/Active-Coconut/scripts/evaluation/evaluation_7b_SFT_all_ck.sh
 EVAL_EXIT=$?
 if [ $EVAL_EXIT -ne 0 ]; then

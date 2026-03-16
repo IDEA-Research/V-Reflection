@@ -1,7 +1,7 @@
 #!/bin/bash
-# SFT with BoxFeatureResampler: fixed 8 latent tokens per bbox, MSE(LLM_8, target.detach()).
-# BoxFeatureResampler is independent of LVR head: use LVR_HEAD=False (no intrinsic-similarity/other head).
-# Uses fixed_num_of_lvr_tokens=8 (no latent_end_token / loss_mode_switch / lvr_latent_end_emb).
+# SFT Stage 3: End-to-end reasoning unlock. CE loss only, no distillation.
+# Loads from Stage 2 checkpoint. DAR in forward path for CE gradient flow.
+# LLM backbone, DAR, vision/merger unfrozen for joint optimization.
 #SBATCH --partition=cvr
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8
@@ -9,7 +9,7 @@
 #SBATCH --gres=gpu:hgx:8
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_box_resampler_b4_latent12_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/SFT_7b_stage3_e2e_lr1e6_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
@@ -42,37 +42,32 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
     echo "data/meta_data_lvr_sft_stage1.json")
 
 MAX_STEPS=2500
-LR=1e-5
-# LVR head disabled: only BoxFeatureResampler loss
+LR=1e-6
 LVR_HEAD=False
-# LVR_HEAD_TYPE 仅在 LVR_HEAD=True 时需要设置，否则脚本不会传 --lvr_head_type
 
-# BoxFeatureResampler: GT box tokens -> resampler -> 8 tokens; sequence has 8 latent slots per bbox.
+# Stage 3: use_stage3_e2e=True, CE loss only. Requires use_box_feature_resampler (from Stage 2)
 USE_BOX_FEATURE_RESAMPLER=True
-NUM_LATENT_TOKENS=12
+USE_STAGE2_DISTILLATION=True
+USE_STAGE3_E2E=True
+NUM_LATENT_TOKENS=8
 LATENT_END_TOKEN=False
-LOSS_LVR_RESAMPLER_LAMBDA=0.1
-LOSS_MODE_SWITCH_LAMBDA=0
-
-# Loss control
-USE_MSE_LOSS=True
-LVR_LOSS_FCT=mse
-LAMBDA_LVR=0.1
 
 MAX_TOKEN=5120
 MIN_TOKEN=128
 
-RUN_NAME="SFT_box_resampler_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_LVR${LAMBDA_LVR}_resampler${LOSS_LVR_RESAMPLER_LAMBDA}_acc${GRAD_ACCUM_STEPS}_latent${NUM_LATENT_TOKENSNUM_LATENT_TOKENS}"
-OUTPUT_DIR="result/box_resampler/${RUN_NAME}/"
+RUN_NAME="SFT_stage3_e2e_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_acc${GRAD_ACCUM_STEPS}_latent${NUM_LATENT_TOKENS}_lr${LR}"
+OUTPUT_DIR="result/stage3_e2e/${RUN_NAME}/"
 
-# 如果需要从已有 checkpoint 继续训练，请在提交前设置 CHECKPOINT_PATH，例如：
-# CHECKPOINT_PATH=\"/comp_robot/zhoujiazhou/projects/Active-Coconut/result/box_resampler/SFT_box_resampler_steps2500_b4_LVR0.1_resampler0.1_acc8/checkpoint-1800\" sbatch scripts/sbatch/sft_7b_box_resampler.sh
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
+# Stage 2 checkpoint (required): model with student_resampler
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/stage2_distillation/SFT_stage2_distillation_steps2500_b4_LVR0.1_resampler0.5_attnTransfer1.0_acc8_latent8/checkpoint-2500}"
+if [ -z "$CHECKPOINT_PATH" ]; then
+    echo "[WARN] CHECKPOINT_PATH not set. Stage 3 requires Stage 2 checkpoint with student_resampler."
+    echo "       Set env: CHECKPOINT_PATH=\"path/to/stage2_checkpoint\" sbatch scripts/sbatch/sft_7b_stage3_e2e.sh"
+fi
 
 mkdir -p logs "$OUTPUT_DIR"
 export WANDB_RUN_NAME="$RUN_NAME"
 MASTER_PORT="${MASTER_PORT:-29500}"
-# 仅当 LVR_HEAD=True 时传 --lvr_head_type，避免 LVR_HEAD=False 时还要无意义地指定 type
 [ "$LVR_HEAD" = "True" ] && LVR_HEAD_TYPE_ARG="--lvr_head_type ${LVR_HEAD_TYPE:-simple}" || LVR_HEAD_TYPE_ARG=""
 
 CHECKPOINT_ARGS=""
@@ -81,7 +76,6 @@ CHECKPOINT_ARGS=""
 DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --run_name \"$RUN_NAME\" \
     --coconut True \
-    --loss_lvr_fct $LVR_LOSS_FCT \
     --deepspeed scripts/zero3_offload.json \
     --model_id $MODEL_NAME \
     --data_path \"$DATA_PATH\" \
@@ -89,16 +83,14 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --lvr_head $LVR_HEAD \
     --latent_end_token $LATENT_END_TOKEN \
     --use_box_feature_resampler $USE_BOX_FEATURE_RESAMPLER \
+    --use_stage2_distillation $USE_STAGE2_DISTILLATION \
+    --use_stage3_e2e $USE_STAGE3_E2E \
     --num_latent_tokens $NUM_LATENT_TOKENS \
-    --loss_lvr_resampler_lambda $LOSS_LVR_RESAMPLER_LAMBDA \
-    --loss_mode_switch_lambda $LOSS_MODE_SWITCH_LAMBDA \
-    --freeze_vision_tower True \
-    --freeze_merger True \
+    --freeze_vision_tower False \
+    --freeze_merger False \
     --freeze_llm False \
     --max_steps $MAX_STEPS \
     --learning_rate $LR \
-    --loss_lvr_lambda $LAMBDA_LVR \
-    --use_mse_loss $USE_MSE_LOSS \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 False \
@@ -135,10 +127,10 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Training completed. Starting evaluation of all checkpoints..."
-# 使用本次训练的保存目录作为评估的 checkpoint 根目录，对所有 ck 跑一遍评估
 export BASE_CHECKPOINT_DIR="${PWD}/${OUTPUT_DIR}"
-# 可选：与训练保持一致的数据配置
 export DATASET_CONFIG="${DATASET_CONFIG:-default}"
+# 指定测试集: BLINK, MMVP, VSTAR, POPE
+export EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-BLINK, MMVP, VSTAR, POPE}"
 bash /comp_robot/zhoujiazhou/projects/Active-Coconut/scripts/evaluation/evaluation_7b_SFT_all_ck.sh
 EVAL_EXIT=$?
 if [ $EVAL_EXIT -ne 0 ]; then

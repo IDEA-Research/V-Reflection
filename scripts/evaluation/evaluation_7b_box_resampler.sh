@@ -13,11 +13,18 @@
 # Tests all checkpoints with step4 and step8 to compare LVR thinking steps
 # ============================================================================
 
-# Base checkpoint directory for box_resampler model
-BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/box_resampler/SFT_box_resampler_steps2500_b4_LVR0.1_resampler0.1_acc8}"
+# Base checkpoint directory for box_resampler model (parent dir containing checkpoint-*)
+BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/box_resampler/SFT_box_resampler_steps2500_b4_resampler0.5_acc8_latent8_lr5e-6}"
 
-# Auto-detect all checkpoint directories
-if [ -z "${CHECKPOINT_STEPS+x}" ]; then
+# Only test specific checkpoint(s). Set to "2500" for ck-2500 only; leave empty to auto-detect all
+CHECKPOINT_STEPS="${CHECKPOINT_STEPS:-}"
+
+# Only test specific benchmarks. Comma-separated, e.g. "MathVision,MathVista,VisuLogic,EMMA". Empty = all
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-BLINK, MMVP, VSTAR, POPE}"
+export EVAL_BENCHMARKS
+
+# Auto-detect all checkpoint directories (only when CHECKPOINT_STEPS is empty)
+if [ -z "${CHECKPOINT_STEPS}" ]; then
     echo "Auto-detecting checkpoints in: $BASE_CHECKPOINT_DIR"
     CHECKPOINT_DIRS=$(find "$BASE_CHECKPOINT_DIR" -type d -name "checkpoint-*" | sort -V)
     if [ -z "$CHECKPOINT_DIRS" ]; then
@@ -55,6 +62,7 @@ export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
 EVAL_SCRIPT="${PROJECT_ROOT}/evaluation/evaluation.py"
 ACCURACY_SCRIPT="${PROJECT_ROOT}/evaluation/calculate_accuracy_by_category.py"
+MERGE_SCRIPT="${PROJECT_ROOT}/evaluation/merge_process_results.py"
 
 if [ -z "$CUDA_VISIBLE_DEVICES" ]; then
     export CUDA_VISIBLE_DEVICES="0,1,2,3,4,5,6,7"
@@ -134,12 +142,14 @@ calculate_accuracy() {
 import json
 from collections import defaultdict
 
-def extract_answer(pred):
+def extract_answer(pred, is_mcq=True):
     given_answer = pred.split('<answer>')[-1].split('</answer')[0].strip()
-    if " " in given_answer:
-        given_answer = given_answer.split(" ")[0]
-    if len(given_answer) > 1:
-        given_answer = given_answer[0]
+    if is_mcq:
+        if " " in given_answer:
+            given_answer = given_answer.split(" ")[0]
+        if len(given_answer) > 1:
+            given_answer = given_answer[0]
+        return given_answer.upper()
     return given_answer
 
 try:
@@ -157,13 +167,18 @@ try:
             continue
             
         pred = item['prediction'][0] if isinstance(item['prediction'], list) else item['prediction']
-        label = item['label']
+        label = str(item['label'])
         category = item.get('category', 'Unknown')
+        is_mcq = len(label) == 1 and label.upper() in 'ABCDE'
         
-        given_answer = extract_answer(pred)
+        given_answer = extract_answer(pred, is_mcq)
         
         category_stats[category]['total'] += 1
-        if given_answer == label:
+        if is_mcq:
+            match = given_answer == label.upper()
+        else:
+            match = given_answer.lower().strip() == label.lower().strip()
+        if match:
             correct += 1
             category_stats[category]['correct'] += 1
         total += 1
@@ -291,6 +306,12 @@ print(f'{100*correct/total:.2f}' if total > 0 else 'N/A')
         # MMVP results
         local mmvp_json="${PROJECT_ROOT}/evaluation/results/MMVP/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json"
         calculate_accuracy "$mmvp_json" "MMVP"
+
+        # MathVision, MathVista, VisuLogic, EMMA results
+        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/MathVision/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "MathVision" 0
+        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/MathVista/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "MathVista" 0
+        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/VisuLogic/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "VisuLogic" 0
+        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/EMMA/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "EMMA" 0
     done
     
     echo ""
@@ -314,6 +335,54 @@ for step in "${CHECKPOINT_STEPS[@]}"; do
         failed_checkpoints+=("$step")
     fi
 done
+
+# ============================================================================
+# Step 2.5: Merge orphaned _process*.json files (when Process 0 merge failed)
+# ============================================================================
+echo ""
+echo "============================================================================"
+echo "Step 2.5: Merging orphaned process result files"
+echo "============================================================================"
+
+result_prefix="/comp_robot/zhoujiazhou/projects/Active-Coconut/result"
+if [[ "$BASE_CHECKPOINT_DIR" == "$result_prefix"* ]]; then
+    run_name="${BASE_CHECKPOINT_DIR#$result_prefix/}"
+else
+    run_name=$(basename "$(dirname "$BASE_CHECKPOINT_DIR")")
+fi
+run_name="${run_name%/}"
+
+IFS=',' read -ra STEP_ARRAY <<< "$EVAL_STEP_LIST"
+DATASETS=("blink:BLINK" "vstar_bench:VSTAR" "MMVP:MMVP" "MathVision:MathVision" "MathVista:MathVista" "VisuLogic:VisuLogic" "EMMA:EMMA")
+merge_count=0
+
+for ck in "${CHECKPOINT_STEPS[@]}"; do
+    for eval_step in "${STEP_ARRAY[@]}"; do
+        eval_step=$(echo "$eval_step" | xargs)
+        for ds_entry in "${DATASETS[@]}"; do
+            ds_dir="${ds_entry%%:*}"
+            ds_name="${ds_entry##*:}"
+            result_dir="${PROJECT_ROOT}/evaluation/results/${ds_dir}/decoding_by_steps/${run_name}"
+            final_file="${result_dir}/ck-${ck}-step${eval_step}.json"
+            if [ ! -f "$final_file" ]; then
+                process_pattern="${result_dir}/ck-${ck}-step${eval_step}_process*.json"
+                if ls $process_pattern 1>/dev/null 2>&1; then
+                    echo "  [Merge] ${ds_name} ck-${ck} step${eval_step}: merging orphaned process files..."
+                    if python3 "$MERGE_SCRIPT" "$result_dir" "$ds_name" "$ck" "$eval_step"; then
+                        ((merge_count++)) || true
+                    fi
+                fi
+            fi
+        done
+    done
+done
+
+if [ "$merge_count" -gt 0 ]; then
+    echo "  Merged $merge_count result set(s)"
+else
+    echo "  No orphaned process files found"
+fi
+echo ""
 
 # ============================================================================
 # Final Summary - Generate comprehensive results table
@@ -410,6 +479,10 @@ datasets = {
     'BLINK': f'{project_root}/evaluation/results/blink/decoding_by_steps/{run_name}',
     'VSTAR': f'{project_root}/evaluation/results/vstar_bench/decoding_by_steps/{run_name}',
     'MMVP': f'{project_root}/evaluation/results/MMVP/decoding_by_steps/{run_name}',
+    'MathVision': f'{project_root}/evaluation/results/MathVision/decoding_by_steps/{run_name}',
+    'MathVista': f'{project_root}/evaluation/results/MathVista/decoding_by_steps/{run_name}',
+    'VisuLogic': f'{project_root}/evaluation/results/VisuLogic/decoding_by_steps/{run_name}',
+    'EMMA': f'{project_root}/evaluation/results/EMMA/decoding_by_steps/{run_name}',
 }
 
 # Collect all results

@@ -47,10 +47,10 @@ def accuracy_reward(completions, assistant, **kwargs):
 
 
 def format_reward(completions, **kwargs):
-    """Reward function that checks if the completion has a specific format."""
-    # pattern = r"<think>.*?</think>\s*<answer>.*?</answer>"
-    # lvr tokens are double-checked to reset as non-special tokens
-    pattern = r"^<\|lvr_start\|>.*?<\|lvr_end\|>\s*<answer>.*?</answer>$"
+    """Reward function that checks if <lvr_start>, <lvr>, <lvr_end> are used correctly in sequence.
+    Returns +0.2 if format is correct, 0 otherwise (R_fmt in GRPO spec)."""
+    # Require <lvr_start> -> <lvr> -> <lvr_end> in order, then <answer>...</answer>
+    pattern = r"<\|lvr_start\|>.*?<\|lvr\|>.*?<\|lvr_end\|>\s*<answer>.*?</answer>"
     completion_contents = [completion[0]["content"] for completion in completions]
-    matches = [re.match(pattern, content) for content in completion_contents]
-    return [1.0 if match else 0.0 for match in matches]
+    matches = [re.search(pattern, content, re.DOTALL) for content in completion_contents]
+    return [0.2 if match else 0.0 for match in matches]

@@ -36,18 +36,26 @@ def merge_process_results(result_dir, dataset_name, checkpoint_num, step_num):
     
     print(f"[Merge] Found {len(process_files)} process files for {base_filename}")
     
-    # Check if final file already exists and is complete
+    # Count samples we'd get from process files (for partial merge recovery)
+    process_file_sample_count = 0
+    for pf in process_files:
+        try:
+            with open(pf, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                process_file_sample_count += len([x for x in data if 'id' in x or 'prediction' in x])
+        except Exception:
+            pass
+    
+    # Skip only if final exists and has MORE samples than process files (final is more complete)
     if os.path.exists(final_file):
         try:
             with open(final_file, 'r') as f:
                 existing_data = json.load(f)
-            # Check if it's a complete result (has more than just summary)
-            if isinstance(existing_data, list) and len(existing_data) > 0:
-                # Check if it has actual results (not just summary)
-                has_results = any('id' in item or 'prediction' in item for item in existing_data)
-                if has_results:
-                    print(f"[Merge] Final file {final_file} already exists and appears complete, skipping merge")
-                    # Still clean up process files if they exist
+            if isinstance(existing_data, list):
+                existing_count = len([x for x in existing_data if 'id' in x or 'prediction' in x])
+                if existing_count >= process_file_sample_count:
+                    print(f"[Merge] Final file has {existing_count} samples >= {process_file_sample_count} from process files, skipping")
                     for pf in process_files:
                         try:
                             os.remove(pf)
@@ -76,11 +84,13 @@ def merge_process_results(result_dir, dataset_name, checkpoint_num, step_num):
         print(f"[Merge] Warning: No data to merge for {base_filename}")
         return False
     
-    # Sort by id to maintain order
-    try:
-        merged_result.sort(key=lambda x: int(x.get('id', 0)) if isinstance(x.get('id'), (str, int)) else 0)
-    except Exception as e:
-        print(f"[Merge] Warning: Could not sort results: {e}")
+    # Sort by id to maintain order (id can be int or str like "val_Counting_1")
+    def _sort_key(x):
+        if 'id' not in x:
+            return ''
+        vid = x.get('id')
+        return str(vid) if vid is not None else ''
+    merged_result.sort(key=_sort_key)
     
     # Import accuracy calculation function if available
     try:

@@ -34,36 +34,6 @@ from PIL import Image
 from typing import List, Tuple, Optional
 import math
 
-# DiT reconstruction: crop bbox region and resize, normalize to [-1, 1]
-# Default crop size is now controlled via data_args.dit_crop_size (default 128)
-DIT_CROP_SIZE = 128
-
-
-def crop_bbox_and_resize(pil_img: Image.Image, bbox: List[float], size: int = DIT_CROP_SIZE) -> torch.Tensor:
-    """Crop image by normalized bbox [x_min, y_min, x_max, y_max], resize to size x size, return (3, size, size) in [-1, 1]."""
-    w, h = pil_img.size
-    x_min, y_min, x_max, y_max = bbox
-    if max(x_min, y_min, x_max, y_max) > 1.0:
-        x_min, y_min = x_min / w, y_min / h
-        x_max, y_max = x_max / w, y_max / h
-    x_min, y_min = max(0, x_min), max(0, y_min)
-    x_max, y_max = min(1, x_max), min(1, y_max)
-    x1, y1 = int(x_min * w), int(y_min * h)
-    x2, y2 = int(x_max * w), int(y_max * h)
-    if x2 <= x1:
-        x2 = x1 + 1
-    if y2 <= y1:
-        y2 = y1 + 1
-    crop = pil_img.crop((x1, y1, x2, y2))
-    crop = crop.resize((size, size), Image.BICUBIC)
-    arr = np.array(crop)
-    if arr.ndim == 2:
-        arr = np.stack([arr] * 3, axis=-1)
-    arr = arr[:, :, :3].astype(np.float32) / 255.0
-    arr = (arr - 0.5) / 0.5
-    t = torch.from_numpy(arr).permute(2, 0, 1).float()
-    return t
-
 def is_dist_avail_and_initialized():
     if not dist.is_available():
         return False
@@ -208,8 +178,6 @@ class IterableSupervisedDatasetLVR(Dataset):
 
         # int latent_end_token mode, a latent end token wil be appended to the selected lvr tokens
         self.latent_end_token = latent_end_token
-        # DiT crop size: controlled via data_args, default 128
-        self.dit_crop_size = getattr(data_args, 'dit_crop_size', DIT_CROP_SIZE)
 
     def __len__(self):
         return len(self.raw_data)
@@ -671,27 +639,12 @@ class IterableSupervisedDatasetLVR(Dataset):
                         lvr_tokens[idx] = torch.tensor([0], dtype=torch.int)
                         logger.warning(f"[{self.ds_name}] Replaced empty lvr_tokens[{idx}] with dummy token [0]")
 
-            cropped_bbox_images = None
-            if len(images) > 0 and len(bboxes) > 0 and len(bboxes) == len(lvr_token_idxs_list):
-                crops = []
-                img = images[0]
-                for bbox in bboxes:
-                    b = bbox
-                    while isinstance(b, (list, tuple)) and len(b) == 1 and isinstance(b[0], (list, tuple)):
-                        b = b[0]
-                    if isinstance(b, (list, tuple)) and len(b) >= 4:
-                        crops.append(crop_bbox_and_resize(img, list(b)[:4], size=self.dit_crop_size))
-                if crops:
-                    cropped_bbox_images = torch.stack(crops, dim=0)
-
             data_dict = dict(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels,
                 lvr_tokens=lvr_tokens,
             )
-            if cropped_bbox_images is not None:
-                data_dict['cropped_bbox_images'] = cropped_bbox_images
 
             if pixel_key and grid_key:
                 pixel_values = torch.cat(all_pixel_values, dim=0)
@@ -738,7 +691,7 @@ class IterableSupervisedDatasetLVR(Dataset):
             #   - In variable-length LVR mode (fixed_num_of_lvr_tokens is None), each <lvr> corresponds to ONE visual token index,
             #     so we can safely require:
             #         num_lvr_in_input_ids == total_lvr_tokens.
-            #   - In fixed-length latent mode (self.fixed_num_of_lvr_tokens > 0, e.g. BoxFeatureResampler / DiT recon),
+            #   - In fixed-length latent mode (self.fixed_num_of_lvr_tokens > 0, e.g. BoxFeatureResampler),
             #     each bbox uses `fixed_num_of_lvr_tokens` <lvr> slots, while lvr_tokens stores a *set* of visual
             #     token indices per bbox. In this case, the only meaningful check is:
             #         num_lvr_in_input_ids == fixed_num_of_lvr_tokens * num_bboxes
@@ -748,7 +701,7 @@ class IterableSupervisedDatasetLVR(Dataset):
             num_lvr_in_input_ids = (input_ids == lvr_token_id).sum().item()
 
             if self.fixed_num_of_lvr_tokens:
-                # Fixed-N latent mode (BoxFeatureResampler / DiT recon): check per-bbox slot count.
+                # Fixed-N latent mode (BoxFeatureResampler): check per-bbox slot count.
                 if num_lvr_in_input_ids % self.fixed_num_of_lvr_tokens != 0:
                     logger.error(
                         f"[{self.ds_name}] ❌ CRITICAL: lvr_tokens slot mismatch in fixed-N mode! "
@@ -1231,7 +1184,7 @@ class PackedDataset(IterableDataset):
                     for k in buffer:
                         if k in ['input_ids', 'labels', 'attention_mask', 'position_ids', 'data_index']:
                             buffer[k] = buffer[k][:cut_id]
-                        elif k in ['pixel_values', 'image_flags','image_grid_thw', 'cropped_bbox_images']:
+                        elif k in ['pixel_values', 'image_flags','image_grid_thw']:
                             buffer[k] = buffer[k]
                         elif k in ['lvr_tokens']:
                             # CRITICAL: After truncating input_ids, check if any <lvr> tokens remain
@@ -1668,7 +1621,6 @@ class PackedDataCollatorForSupervisedDatasetLVR(object):
         all_lvr_tokens = []
         all_pixel_values = []
         all_image_grid_thw = []
-        all_cropped_bbox_images = []
         
         # Collect debug information
         all_debug_questions = []
@@ -1686,8 +1638,6 @@ class PackedDataCollatorForSupervisedDatasetLVR(object):
             all_lvr_tokens.extend(feature['lvr_tokens'])
             all_pixel_values.append(feature['pixel_values'])
             all_image_grid_thw.append(feature['image_grid_thw'])
-            if 'cropped_bbox_images' in feature and feature['cropped_bbox_images'] is not None:
-                all_cropped_bbox_images.append(feature['cropped_bbox_images'])
             
             # Extract debug information if available
             if '_debug_question' in feature:
@@ -1734,9 +1684,7 @@ class PackedDataCollatorForSupervisedDatasetLVR(object):
             "pixel_values": torch.cat(all_pixel_values),
             "image_grid_thw": torch.cat(all_image_grid_thw),
         }
-        if all_cropped_bbox_images:
-            data_dict["cropped_bbox_images"] = torch.cat(all_cropped_bbox_images, dim=0)
-        
+
         # Add debug information if available
         # CRITICAL: Convert to simple strings to prevent RecursionError in pin_memory
         # pin_memory recursively processes nested lists, deep nesting causes stack overflow

@@ -2244,25 +2244,117 @@ class BoxFeatureResampler(nn.Module):
         self,
         bbox_region_features: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        return_attention: bool = False,
+    ):
         """
         Args:
             bbox_region_features: (L, N, D) L=num_bboxes, N=variable tokens per bbox, D=vision_dim or hidden_size
             key_padding_mask: (L, N) True for padding positions (ignore), False for valid. Optional.
+            return_attention: If True, also return attention weights (L, num_queries, N).
         Returns:
-            (L, num_queries, hidden_size)
+            (L, num_queries, hidden_size) or ((L, num_queries, hidden_size), (L, num_queries, N)) when return_attention
         """
         L, N, D = bbox_region_features.shape
         if self.vision_proj is not None:
             bbox_region_features = self.vision_proj(bbox_region_features)
         q = self.queries.expand(L, -1, -1)
-        attn_out, _ = self.cross_attn(
+        attn_out, attn_weights = self.cross_attn(
             q,
             bbox_region_features,
             bbox_region_features,
             key_padding_mask=key_padding_mask,
+            need_weights=return_attention,
         )
-        return self.output_norm(attn_out)
+        out = self.output_norm(attn_out)
+        if return_attention:
+            return out, attn_weights
+        return out
+
+    def get_orthogonality_loss(self) -> torch.Tensor:
+        """Orthogonality loss to prevent attention collapse: penalize non-orthogonal queries.
+        Computed in float32 to avoid gradient underflow in bf16. Scaled by 1000 so gradient
+        magnitude is comparable to other losses (raw MSE ~0.0002 at init would underflow)."""
+        q = self.queries.squeeze(0).float()  # [8, D], float32 for stable gradients
+        q_norm = F.normalize(q, p=2, dim=-1)
+        sim_matrix = torch.matmul(q_norm, q_norm.transpose(0, 1))  # [8, 8]
+        identity = torch.eye(sim_matrix.size(0), device=sim_matrix.device, dtype=torch.float32)
+        loss = F.mse_loss(sim_matrix, identity)
+        return loss * 1000.0  # scale so initial ~0.2, gradient flows properly
+
+
+class DynamicAutoregressiveResampler(nn.Module):
+    """
+    Stage 2 Student: Uses LLM's 8 autoregressive hidden states at <lvr> positions as Queries,
+    cross-attends to full image features, outputs predicted latent tokens aligned with Teacher target.
+    No MLP query projection - queries come directly from LLM hidden states.
+    """
+    def __init__(
+        self,
+        hidden_size: int,
+        llm_hidden_size: Optional[int] = None,
+        vision_dim: Optional[int] = None,
+        num_queries: int = 8,
+        num_heads: Optional[int] = None,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.num_queries = num_queries
+        llm_hidden_size = llm_hidden_size or hidden_size
+        vision_dim = vision_dim or hidden_size
+        self.llm_hidden_size = llm_hidden_size
+        self.vision_dim = vision_dim
+        num_heads = num_heads or min(8, hidden_size // 64)
+        self.num_heads = num_heads
+
+        if llm_hidden_size != hidden_size:
+            self.q_proj = nn.Linear(llm_hidden_size, hidden_size, bias=False)
+        else:
+            self.q_proj = None
+        if vision_dim != hidden_size:
+            self.kv_proj = nn.Linear(vision_dim, hidden_size, bias=False)
+        else:
+            self.kv_proj = None
+
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_size,
+            num_heads=num_heads,
+            dropout=0.0,
+            batch_first=True,
+        )
+        self.output_norm = LayerNorm(hidden_size, eps=1e-6)
+
+    def forward(
+        self,
+        lvr_hidden_states: torch.Tensor,
+        full_image_features: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ):
+        """
+        Args:
+            lvr_hidden_states: [B, 8, D_llm] - LLM hidden states at 8 consecutive <lvr> positions
+            full_image_features: [B, Seq_Len, D_vis] - Full image features from visual encoder
+            key_padding_mask: [B, Seq_Len] - True for padding positions (ignore), False for valid. Optional.
+            return_attention: If True, also return attention weights (B, 8, Seq_Len).
+        Returns:
+            [B, 8, hidden_size] or ((B, 8, hidden_size), (B, 8, Seq_Len)) when return_attention
+        """
+        B, Q, _ = lvr_hidden_states.shape
+        if self.q_proj is not None:
+            q = self.q_proj(lvr_hidden_states)
+        else:
+            q = lvr_hidden_states
+        if self.kv_proj is not None:
+            kv = self.kv_proj(full_image_features)
+        else:
+            kv = full_image_features
+        attn_out, attn_weights = self.cross_attn(
+            q, kv, kv, key_padding_mask=key_padding_mask, need_weights=return_attention
+        )
+        out = self.output_norm(attn_out)
+        if return_attention:
+            return out, attn_weights
+        return out
 
 
 class LVRBboxMLP(nn.Module):
@@ -2286,610 +2378,3 @@ class LVRBboxMLP(nn.Module):
         key_padding_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.resampler(bbox_region_features, key_padding_mask=key_padding_mask)
-
-
-# Optional diffusers for DiT reconstruction head
-try:
-    from diffusers import AutoencoderKL, DDPMScheduler, DDIMScheduler
-    DIFFUSERS_AVAILABLE = True
-except ImportError:
-    DIFFUSERS_AVAILABLE = False
-    AutoencoderKL = None
-    DDPMScheduler = None
-    DDIMScheduler = None
-
-
-class DiTReconstructionHead(nn.Module):
-    """
-    DiT-XL-2 pixel reconstruction head.
-    Train: bbox crop -> VAE encode -> add noise -> DiT denoise (conditioned on LLM 8 tokens) -> decode -> MSE loss.
-    Infer: LLM 8 tokens -> DiT denoise from noise -> decode -> image.
-    """
-    patch_size = 2
-    in_channels = 4
-    out_channels = 8  # DiT-XL-2 with learn_sigma=True: out_channels = in_channels * 2
-    hidden_size = 1152  # DiT-XL-2
-    depth = 28  # DiT-XL-2
-    num_heads = 16  # DiT-XL-2
-    num_condition_tokens = 8
-
-    def __init__(
-        self,
-        llm_hidden_size: int = 3584,
-        dit_hidden_size: int = 1152,  # DiT-XL-2 default
-        vae_repo: str = "stabilityai/sd-vae-ft-mse",
-        dit_pretrained_path: Optional[str] = None,
-        crop_size: int = 128,
-    ):
-        super().__init__()
-        if not DIFFUSERS_AVAILABLE:
-            raise ImportError("DiTReconstructionHead requires diffusers. Install with: pip install diffusers")
-        self.llm_hidden_size = llm_hidden_size
-        self.dit_hidden_size = dit_hidden_size
-        self.crop_size = crop_size
-        self.latent_size = crop_size // 8  # VAE 8x downsampling: 128->16, 256->32
-        self.n_patch = self.latent_size // self.patch_size
-        self.num_patches = self.n_patch * self.n_patch
-        # Use out_channels for final_layer to match official DiT-XL-2 (learn_sigma=True)
-        # During training we only use the first 4 channels (noise prediction)
-        self.patch_dim = self.patch_size * self.patch_size * self.out_channels  # 2*2*8 = 32
-
-        # Defer VAE loading to avoid DeepSpeed ZeRO-3 meta tensor issues
-        # ZeRO-3 intercepts nn.Module.__init__ and creates meta tensors, which breaks from_pretrained
-        # Solution: Load VAE lazily on first forward pass, outside of ZeRO-3 init context
-        self._load_vae_outside_zero3(vae_repo)  # Sets up lazy loading
-
-        # Condition adapter: maps LLM tokens to DiT hidden size
-        self.condition_proj = nn.Linear(llm_hidden_size, dit_hidden_size)
-        
-        # x_embedder: patch embedding using Conv2d (matching official DiT-XL-2)
-        # Input: (B, 4, H, W) latent -> Output: (B, hidden_size, H//patch_size, W//patch_size)
-        # Then flattened to (B, num_patches, hidden_size)
-        self.x_embedder = nn.Conv2d(
-            self.in_channels, 
-            dit_hidden_size, 
-            kernel_size=self.patch_size, 
-            stride=self.patch_size,
-            bias=True
-        )
-        
-        # Legacy proj_in for backward compatibility (will be replaced by x_embedder in forward)
-        # Keep for now but will use x_embedder instead
-        self.proj_in = None  # Deprecated, use x_embedder instead
-        # Timestep embedding: official DiT-XL-2 uses fixed 256-dim sinusoidal embedding
-        # then maps to hidden_size via MLP: 256 -> hidden -> hidden (NOT 256 -> hidden*4 -> hidden)
-        self.t_embed_dim = 256  # Fixed dimension matching official DiT-XL-2
-        self.t_embed_mlp = nn.Sequential(
-            nn.Linear(self.t_embed_dim, dit_hidden_size),
-            nn.SiLU(),
-            nn.Linear(dit_hidden_size, dit_hidden_size),
-        )
-
-        self.blocks = nn.ModuleList([
-            _DiTBlock(dit_hidden_size, num_heads=self.num_heads)
-            for _ in range(self.depth)
-        ])
-        self.norm = LayerNorm(dit_hidden_size, eps=1e-6)
-        
-        # final_layer: output projection back to patch space
-        self.final_layer = nn.Linear(dit_hidden_size, self.patch_dim)
-        # Legacy name for backward compatibility
-        self.proj_out = self.final_layer
-
-        self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=1000,
-            beta_schedule="scaled_linear",
-            beta_start=0.0001,
-            beta_end=0.02,
-            prediction_type="epsilon",
-            clip_sample=False,
-        )
-
-        # DDIMScheduler for faster inference sampling.
-        # IMPORTANT: Use from_config to ensure alpha/beta values match training DDPMScheduler exactly.
-        # Mismatch causes DDIM sampling to produce garbage (one-step denoise works but generate fails).
-        # timestep_spacing="trailing" per "Common Diffusion Noise Schedules and Sample Steps are Flawed"
-        self.inference_scheduler = DDIMScheduler.from_config(
-            self.noise_scheduler.config,
-            timestep_spacing="trailing",
-        )
-
-        # Defer pretrained weight loading to outside ZeRO-3 init context.
-        # ZeRO-3 creates meta tensors during __init__, so all parameter sizes are 0.
-        # We must load weights after model initialization is complete.
-        self._dit_pretrained_path = dit_pretrained_path
-        self._dit_weights_loaded = False
-
-    def _load_vae_outside_zero3(self, vae_repo: str):
-        """Load VAE while bypassing DeepSpeed ZeRO-3's nn.Module.__init__ wrapper.
-        
-        ZeRO-3 wraps nn.Module.__init__ to create meta tensors and then tries to move
-        them to device, which fails because meta tensors have no data.
-        
-        Solution: Don't load VAE in __init__. Instead, defer loading to first forward pass
-        when DeepSpeed context is no longer active. Store vae_repo for later use.
-        """
-        # We can't load VAE here because we're inside DeepSpeed's ZeRO-3 init context.
-        # Return None and load lazily on first use.
-        self._vae_repo = vae_repo
-        self._vae_loaded = False
-        return None
-    
-    def _ensure_vae_loaded(self):
-        """Lazy-load VAE on first use, outside of DeepSpeed init context."""
-        if self._vae_loaded:
-            return
-        
-        # Now we're outside the __init__ context, safe to load
-        print(f"[DiTReconstructionHead] Lazy-loading VAE from {self._vae_repo}...", flush=True)
-        vae = AutoencoderKL.from_pretrained(self._vae_repo)
-        for p in vae.parameters():
-            p.requires_grad = False
-        
-        # Move VAE to same device as model parameters
-        # In DeepSpeed ZeRO-3, parameters might be on meta device, so check for a valid device
-        try:
-            device = next(p.device for p in self.parameters() if p.device.type != 'meta')
-        except StopIteration:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
-        vae = vae.to(device)
-        
-        # CRITICAL: Use object.__setattr__ to bypass nn.Module's submodule registration
-        # This prevents DeepSpeed ZeRO-3 from trying to manage VAE parameters
-        # (VAE is frozen and doesn't need gradient sync)
-        object.__setattr__(self, '_vae_model', vae)
-        
-        print(f"[DiTReconstructionHead] VAE loaded and moved to {device}", flush=True)
-        self._vae_loaded = True
-    
-    @property
-    def vae(self):
-        """Access VAE model (stored outside nn.Module to avoid DeepSpeed management)."""
-        return getattr(self, '_vae_model', None)
-
-    def _ensure_dit_weights_loaded(self):
-        """Lazy-load pretrained DiT weights on first forward, outside ZeRO-3 init context."""
-        if self._dit_weights_loaded:
-            return
-        self._dit_weights_loaded = True  # Set early to avoid re-entry
-        
-        path = self._dit_pretrained_path
-        if not path or path.strip() == "":
-            return
-        
-        import os
-        if not os.path.exists(path):
-            print(f"[DiTReconstructionHead] Pretrained weights not found: {path}, training from scratch", flush=True)
-            return
-        
-        self._load_pretrained_dit(path)
-
-    def _load_pretrained_dit(self, path: str):
-        """
-        Load pretrained DiT-XL-2 weights from .pt checkpoint.
-        
-        Official DiT-XL-2 key structure:
-          x_embedder.proj.weight/bias        -> Conv2d patch embedding
-          t_embedder.mlp.0.weight/bias       -> timestep MLP layer 1 (256 -> hidden*4)
-          t_embedder.mlp.2.weight/bias       -> timestep MLP layer 2 (hidden*4 -> hidden)
-          y_embedder.embedding_table.weight   -> class embedding (SKIP)
-          pos_embed                           -> positional embedding (SKIP)
-          blocks.N.attn.qkv.weight/bias      -> fused QKV  -> our attn.in_proj_weight/bias
-          blocks.N.attn.proj.weight/bias      -> attn out   -> our attn.out_proj.weight/bias
-          blocks.N.mlp.fc1.weight/bias        -> MLP layer1 -> our mlp.0.weight/bias
-          blocks.N.mlp.fc2.weight/bias        -> MLP layer2 -> our mlp.2.weight/bias
-          blocks.N.adaLN_modulation.*         -> adaptive LN (SKIP, no equivalent)
-          final_layer.adaLN_modulation.*      -> adaptive LN (SKIP)
-          final_layer.linear.weight/bias      -> output proj -> our final_layer.weight/bias
-        """
-        try:
-            checkpoint = torch.load(path, map_location='cpu')
-            
-            # Handle different checkpoint formats (ema key, model key, raw state_dict)
-            if isinstance(checkpoint, dict):
-                if 'ema' in checkpoint:
-                    state_dict = checkpoint['ema']
-                    print(f"[DiTReconstructionHead] Using EMA weights from checkpoint", flush=True)
-                elif 'model' in checkpoint:
-                    state_dict = checkpoint['model']
-                elif 'state_dict' in checkpoint:
-                    state_dict = checkpoint['state_dict']
-                else:
-                    state_dict = checkpoint
-            else:
-                state_dict = checkpoint
-            
-            loaded_count = 0
-            skipped_keys = []
-            
-            def _safe_copy(target_param, source_tensor, key_name):
-                """Copy source tensor to target parameter with shape validation."""
-                nonlocal loaded_count
-                if target_param.shape == source_tensor.shape:
-                    target_param.data.copy_(source_tensor)
-                    loaded_count += 1
-                    return True
-                else:
-                    print(f"[DiTReconstructionHead] Shape mismatch for {key_name}: "
-                          f"ours={target_param.shape}, pretrained={source_tensor.shape}", flush=True)
-                    return False
-            
-            # ---- x_embedder (patch embedding Conv2d) ----
-            # Official key: x_embedder.proj.weight / x_embedder.proj.bias
-            for src_prefix in ['x_embedder.proj', 'x_embedder']:
-                w_key = f'{src_prefix}.weight'
-                b_key = f'{src_prefix}.bias'
-                if w_key in state_dict:
-                    _safe_copy(self.x_embedder.weight, state_dict[w_key], w_key)
-                    if b_key in state_dict:
-                        _safe_copy(self.x_embedder.bias, state_dict[b_key], b_key)
-                    break
-            
-            # ---- t_embedder (timestep MLP: 256 -> hidden*4 -> hidden) ----
-            # Official: t_embedder.mlp.0 / t_embedder.mlp.2
-            t_map = {
-                't_embedder.mlp.0.weight': (self.t_embed_mlp, '0', 'weight'),
-                't_embedder.mlp.0.bias':   (self.t_embed_mlp, '0', 'bias'),
-                't_embedder.mlp.2.weight': (self.t_embed_mlp, '2', 'weight'),
-                't_embedder.mlp.2.bias':   (self.t_embed_mlp, '2', 'bias'),
-            }
-            for src_key, (container, idx, attr) in t_map.items():
-                if src_key in state_dict:
-                    target = getattr(container[int(idx)], attr)
-                    _safe_copy(target, state_dict[src_key], src_key)
-            
-            # ---- Transformer blocks ----
-            # Official DiT block key mapping:
-            #   attn.qkv.{w,b}           -> our attn.in_proj_{weight,bias}
-            #   attn.proj.{w,b}          -> our attn.out_proj.{weight,bias}
-            #   mlp.fc1.{w,b}            -> our mlp.0.{weight,bias}  (== mlp[0])
-            #   mlp.fc2.{w,b}            -> our mlp.2.{weight,bias}  (== mlp[2])
-            #   adaLN_modulation.*        -> SKIP (no equivalent in our cross-attn design)
-            block_loaded = 0
-            block_skipped = 0
-            for block_idx, block in enumerate(self.blocks):
-                prefix = f'blocks.{block_idx}'
-                
-                # Self-attention: qkv -> in_proj, proj -> out_proj
-                for src_attr, dst_obj, dst_attr in [
-                    (f'{prefix}.attn.qkv.weight', block.attn, 'in_proj_weight'),
-                    (f'{prefix}.attn.qkv.bias',   block.attn, 'in_proj_bias'),
-                    (f'{prefix}.attn.proj.weight', block.attn.out_proj, 'weight'),
-                    (f'{prefix}.attn.proj.bias',   block.attn.out_proj, 'bias'),
-                    # MLP: fc1 -> mlp[0], fc2 -> mlp[2]
-                    (f'{prefix}.mlp.fc1.weight', block.mlp[0], 'weight'),
-                    (f'{prefix}.mlp.fc1.bias',   block.mlp[0], 'bias'),
-                    (f'{prefix}.mlp.fc2.weight', block.mlp[2], 'weight'),
-                    (f'{prefix}.mlp.fc2.bias',   block.mlp[2], 'bias'),
-                ]:
-                    if src_attr in state_dict:
-                        target = getattr(dst_obj, dst_attr)
-                        if _safe_copy(target, state_dict[src_attr], src_attr):
-                            block_loaded += 1
-                        else:
-                            block_skipped += 1
-                
-                # Skip: adaLN_modulation, norm (official uses adaLN, not separate LayerNorm)
-                for k in state_dict:
-                    if k.startswith(prefix) and ('adaLN' in k):
-                        skipped_keys.append(k)
-            
-            # ---- final_layer output projection ----
-            # Official: final_layer.linear.weight/bias
-            for src_key, target_param in [
-                ('final_layer.linear.weight', self.final_layer.weight),
-                ('final_layer.linear.bias',   self.final_layer.bias),
-            ]:
-                if src_key in state_dict:
-                    _safe_copy(target_param, state_dict[src_key], src_key)
-            
-            # ---- Skip: y_embedder, pos_embed, final_layer.adaLN_modulation ----
-            for k in state_dict:
-                if any(skip in k for skip in ['y_embedder', 'pos_embed', 'adaLN']):
-                    if k not in skipped_keys:
-                        skipped_keys.append(k)
-            
-            total = loaded_count + block_loaded
-            print(f"[DiTReconstructionHead] Loaded {total} params from {path} "
-                  f"(global: {loaded_count}, blocks: {block_loaded})", flush=True)
-            
-            if skipped_keys:
-                print(f"[DiTReconstructionHead] Skipped {len(skipped_keys)} keys "
-                      f"(y_embedder/pos_embed/adaLN): {skipped_keys[:5]}...", flush=True)
-                
-        except Exception as e:
-            import traceback
-            print(f"[DiTReconstructionHead] Error loading weights from {path}: {e}", flush=True)
-            traceback.print_exc()
-            print(f"[DiTReconstructionHead] Training from scratch", flush=True)
-
-    def _patchify(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = x.shape
-        p = self.patch_size
-        # Dynamically calculate num_patches based on actual latent shape
-        # This handles cases where VAE output size differs from expected crop_size//8
-        num_patches_h = H // p
-        num_patches_w = W // p
-        num_patches = num_patches_h * num_patches_w
-        # Verify channel count matches expected in_channels
-        if C != self.in_channels:
-            raise ValueError(
-                f"VAE latent channels {C} does not match expected in_channels {self.in_channels}. "
-                f"Latent shape: {x.shape}, crop_size: {self.crop_size}, "
-                f"expected latent_size: {self.latent_size}, expected channels: {self.in_channels}"
-            )
-        # Verify spatial dimensions are divisible by patch_size
-        if H % p != 0 or W % p != 0:
-            raise ValueError(
-                f"Latent spatial dimensions ({H}, {W}) must be divisible by patch_size {p}. "
-                f"Latent shape: {x.shape}, crop_size: {self.crop_size}"
-            )
-        # Patchify: (B, in_channels, H, W) -> (B, num_patches, patch_size^2 * in_channels)
-        # Note: This method is for legacy/fallback use. forward() uses x_embedder (Conv2d) instead.
-        x = x.reshape(B, C, num_patches_h, p, num_patches_w, p)
-        # Permute: (B, C, h, p, w, p) -> (B, h, w, C, p, p) -> (B, h*w, C*p*p)
-        patch_dim_input = p * p * C  # For input latent: 2*2*4 = 16
-        x = x.permute(0, 2, 4, 1, 3, 5).reshape(B, num_patches, patch_dim_input)
-        return x
-
-    def _unpatchify(self, x: torch.Tensor, H_patch: Optional[int] = None, W_patch: Optional[int] = None) -> torch.Tensor:
-        """
-        Convert patch tokens back to spatial latent format.
-        
-        Args:
-            x: (B, num_patches, patch_dim) patch tokens
-            H_patch, W_patch: Optional spatial dimensions. If None, infer from num_patches assuming square.
-        
-        Returns:
-            (B, out_channels, H, W) spatial latent (full output with sigma if learn_sigma=True)
-        """
-        B, N, D = x.shape
-        p = self.patch_size
-        
-        # Verify patch_dim matches
-        if D != self.patch_dim:
-            raise ValueError(
-                f"Patch dimension {D} does not match expected patch_dim {self.patch_dim}"
-            )
-        
-        # Determine spatial dimensions
-        if H_patch is not None and W_patch is not None:
-            h, w = H_patch, W_patch
-            if h * w != N:
-                raise ValueError(
-                    f"num_patches {N} does not match H_patch * W_patch = {h} * {w} = {h * w}"
-                )
-        else:
-            # Infer from num_patches assuming square
-            n_patch = int(N ** 0.5)
-            if n_patch * n_patch != N:
-                raise ValueError(
-                    f"num_patches {N} is not a perfect square, cannot determine spatial dimensions. "
-                    f"Please provide H_patch and W_patch explicitly."
-                )
-            h = w = n_patch
-        
-        # Reshape: (B, num_patches, patch_dim) -> (B, h, w, p, p, out_channels)
-        # patch_dim = p * p * out_channels
-        x = x.reshape(B, h, w, p, p, self.out_channels)
-        # Permute and reshape: -> (B, out_channels, h*p, w*p)
-        x = x.permute(0, 5, 1, 3, 2, 4).reshape(B, self.out_channels, h * p, w * p)
-        return x
-
-    def forward(
-        self,
-        cropped_images: torch.Tensor,
-        llm_condition_tokens: torch.Tensor,
-        timesteps: Optional[torch.Tensor] = None,
-        return_dict: bool = True,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, dict]]:
-        """
-        Args:
-            cropped_images: (B, 3, crop_size, crop_size) RGB, normalized in [-1, 1]
-            llm_condition_tokens: (B, 8, llm_hidden_size)
-            timesteps: (B,) or None; if None, random for training
-        Returns:
-            loss (training) or pred_images (inference)
-        """
-        # Lazy-load VAE and pretrained DiT weights on first use
-        # (deferred from __init__ to avoid DeepSpeed ZeRO-3 meta tensor issues)
-        self._ensure_vae_loaded()
-        self._ensure_dit_weights_loaded()
-        
-        B = cropped_images.shape[0]
-        device = cropped_images.device
-        dtype = cropped_images.dtype
-
-        # VAE is in float32, convert input to float32 for encoding
-        with torch.no_grad():
-            cropped_images_f32 = cropped_images.float()  # Convert bf16 -> float32
-            latent = self.vae.encode(cropped_images_f32).latent_dist.sample()
-            latent = latent * self.vae.config.scaling_factor
-            latent = latent.to(dtype)  # Convert back to original dtype for DiT processing
-        
-        # Debug: Check latent shape matches expectations
-        # VAE should output (B, 4, H, W) where H=W=crop_size//8
-        if latent.shape[1] != self.in_channels:
-            # Try to handle different VAE output formats
-            # Some VAEs might output (B, C, H, W) with C != 4
-            # If spatial dims match but channels don't, we need to adapt
-            B_latent, C_latent, H_latent, W_latent = latent.shape
-            expected_H = self.latent_size
-            expected_W = self.latent_size
-            
-            if H_latent == expected_H and W_latent == expected_W and C_latent != self.in_channels:
-                # Spatial dimensions match but channels don't - this is an error
-                raise ValueError(
-                    f"VAE latent channels mismatch: got {C_latent}, expected {self.in_channels}. "
-                    f"Latent shape: {latent.shape}, crop_size: {self.crop_size}, "
-                    f"expected latent_size: {self.latent_size}, expected shape: (B, {self.in_channels}, {expected_H}, {expected_W})"
-                )
-            elif H_latent != expected_H or W_latent != expected_W:
-                # Spatial dimensions don't match - update expected dimensions
-                import warnings
-                warnings.warn(
-                    f"VAE latent spatial dimensions ({H_latent}, {W_latent}) differ from expected ({expected_H}, {expected_W}). "
-                    f"Latent shape: {latent.shape}, crop_size: {self.crop_size}. "
-                    f"This may cause issues with patchify/unpatchify operations."
-                )
-
-        if self.training and timesteps is None:
-            timesteps = torch.randint(0, self.noise_scheduler.config.num_train_timesteps, (B,), device=device, dtype=torch.long)
-        elif not self.training and timesteps is None:
-            timesteps = torch.zeros(B, device=device, dtype=torch.long)
-
-        noise = torch.randn_like(latent, device=device, dtype=dtype)
-        noisy_latent = self.noise_scheduler.add_noise(latent, noise, timesteps)
-
-        cond = self.condition_proj(llm_condition_tokens)  # (B, 8, dit_hidden_size)
-        t_emb = self._timestep_embed(timesteps, device, dtype)  # (B, dit_hidden_size)
-        
-        # Use x_embedder (Conv2d) for patch embedding, matching official DiT-XL-2
-        # Input: (B, 4, H, W) -> Output: (B, hidden_size, H//patch_size, W//patch_size)
-        x = self.x_embedder(noisy_latent)  # (B, hidden_size, H_patch, W_patch)
-        B_x, C_x, H_patch, W_patch = x.shape
-        # Flatten spatial dimensions: (B, hidden_size, H_patch, W_patch) -> (B, num_patches, hidden_size)
-        x = x.flatten(2).transpose(1, 2)  # (B, num_patches, hidden_size)
-        
-        # Add timestep embedding
-        x = x + t_emb.unsqueeze(1)  # (B, num_patches, hidden_size)
-
-        for blk in self.blocks:
-            x = blk(x, cond)
-
-        x = self.norm(x)
-        noise_pred_patch = self.final_layer(x)  # (B, num_patches, patch_dim)
-        
-        # Unpatchify: convert back to spatial format
-        # (B, num_patches, patch_dim) -> (B, out_channels, H, W)
-        noise_pred_full = self._unpatchify(noise_pred_patch, H_patch, W_patch)
-        
-        # Extract noise prediction (first in_channels=4), ignore sigma (last 4 channels if learn_sigma)
-        noise_pred = noise_pred_full[:, :self.in_channels, :, :]  # (B, 4, H, W)
-
-        if self.training:
-            # Latent Diffusion loss: predict noise in latent space (no VAE decode needed)
-            loss = F.mse_loss(noise_pred, noise)
-            return (loss, {"noise_pred": noise_pred}) if return_dict else loss
-        else:
-            # Non-training forward: return noise_pred directly; use generate() for actual inference
-            return (noise_pred, {}) if return_dict else noise_pred
-
-    @torch.no_grad()
-    def generate(
-        self,
-        llm_condition_tokens: torch.Tensor,
-        num_inference_steps: int = 20,
-        guidance_scale: float = 1.0,
-        return_intermediate: bool = False,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
-        """
-        Generate images from pure noise conditioned on LLM tokens (DDIM sampling).
-        
-        Args:
-            llm_condition_tokens: (B, 8, llm_hidden_size) - LLM hidden states as condition
-            num_inference_steps: Number of denoising steps (default: 20)
-            guidance_scale: Classifier-free guidance scale (1.0 = no guidance)
-            return_intermediate: If True, return intermediate denoising steps
-            
-        Returns:
-            pred_images: (B, 3, crop_size, crop_size) Generated images in [-1, 1]
-            intermediates: (optional) List of intermediate images
-        """
-        self._ensure_vae_loaded()
-        self._ensure_dit_weights_loaded()
-        
-        B = llm_condition_tokens.shape[0]
-        device = llm_condition_tokens.device
-        dtype = llm_condition_tokens.dtype
-        
-        # Project condition tokens
-        cond = self.condition_proj(llm_condition_tokens)  # (B, 8, dit_hidden_size)
-        
-        # Start from pure Gaussian noise
-        latent_shape = (B, self.in_channels, self.latent_size, self.latent_size)
-        latent = torch.randn(latent_shape, device=device, dtype=dtype)
-        
-        # Set up DDIM scheduler for inference
-        self.inference_scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.inference_scheduler.timesteps
-        
-        intermediates = [] if return_intermediate else None
-        
-        # Denoising loop
-        for i, t in enumerate(timesteps):
-            t_batch = t.expand(B)
-            
-            # Get timestep embedding
-            t_emb = self._timestep_embed(t_batch, device, dtype)
-            
-            # Use x_embedder for patch embedding
-            x = self.x_embedder(latent)  # (B, hidden_size, H_patch, W_patch)
-            B_x, C_x, H_patch, W_patch = x.shape
-            x = x.flatten(2).transpose(1, 2)  # (B, num_patches, hidden_size)
-            x = x + t_emb.unsqueeze(1)
-            
-            # DiT blocks with cross-attention to condition
-            for blk in self.blocks:
-                x = blk(x, cond)
-            
-            x = self.norm(x)
-            noise_pred_patch = self.final_layer(x)  # (B, num_patches, patch_dim)
-            noise_pred_full = self._unpatchify(noise_pred_patch, H_patch, W_patch)
-            # Extract noise prediction (first 4 channels), ignore sigma
-            noise_pred = noise_pred_full[:, :self.in_channels, :, :]
-            
-            # DDIM scheduler step: update latents
-            latent = self.inference_scheduler.step(noise_pred, t, latent, return_dict=False)[0]
-            
-            # Save intermediate
-            if return_intermediate and (i % max(num_inference_steps // 10, 1) == 0 or i == len(timesteps) - 1):
-                intermediate_f32 = latent.float() / self.vae.config.scaling_factor
-                intermediate_img = self.vae.decode(intermediate_f32).sample.to(dtype)
-                intermediates.append(intermediate_img.clamp(-1, 1))
-        
-        # Decode final latent to image: undo VAE scaling before decoding
-        latent_f32 = latent.float() / self.vae.config.scaling_factor
-        pred_images = self.vae.decode(latent_f32).sample.to(dtype)
-        pred_images = pred_images.clamp(-1, 1)
-        
-        if return_intermediate:
-            return pred_images, intermediates
-        return pred_images
-
-    def _timestep_embed(self, t: torch.Tensor, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-        # Use fixed 256-dim embedding matching official DiT-XL-2
-        emb = _get_sinusoidal_timestep_embedding(t, self.t_embed_dim, device, dtype)
-        emb = self.t_embed_mlp(emb)
-        return emb
-
-
-def _get_sinusoidal_timestep_embedding(t: torch.Tensor, dim: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    half = dim // 2
-    emb = math.log(10000) / (half - 1)
-    emb = torch.exp(torch.arange(half, device=device, dtype=dtype) * -emb)
-    emb = t[:, None].to(dtype) * emb[None, :]
-    emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
-    return emb
-
-
-class _DiTBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int = 6):
-        super().__init__()
-        self.norm1 = LayerNorm(hidden_size, eps=1e-6)
-        self.attn = nn.MultiheadAttention(hidden_size, num_heads, dropout=0.0, batch_first=True)
-        self.norm2 = LayerNorm(hidden_size, eps=1e-6)
-        self.cross_attn = nn.MultiheadAttention(hidden_size, num_heads, dropout=0.0, batch_first=True)
-        self.norm3 = LayerNorm(hidden_size, eps=1e-6)
-        self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size * 4),
-            nn.GELU(),
-            nn.Linear(hidden_size * 4, hidden_size),
-        )
-
-    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x), need_weights=False)[0]
-        x = x + self.cross_attn(self.norm2(x), cond, cond, need_weights=False)[0]
-        x = x + self.mlp(self.norm3(x))
-        return x

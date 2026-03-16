@@ -53,7 +53,7 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 
 
-from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity, LVRBboxMLP, BoxFeatureResampler, DiTReconstructionHead
+from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity, LVRBboxMLP, BoxFeatureResampler, DynamicAutoregressiveResampler
 
 class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
@@ -75,11 +75,9 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         if getattr(config, 'use_box_feature_resampler', False):
             num_latent_tokens = getattr(config, 'num_latent_tokens', 8)
             self._init_box_feature_resampler(num_latent_tokens)
-        # Initialize DiT pixel reconstruction head
-        if getattr(config, 'use_dit_reconstruction', False):
-            dit_pretrained_path = getattr(config, 'dit_pretrained_path', None)
-            self._init_dit_reconstruction_head(dit_pretrained_path=dit_pretrained_path)
-
+        # Initialize Stage 2: DynamicAutoregressiveResampler (Student) + freeze BoxFeatureResampler (Teacher)
+        if getattr(config, 'use_stage2_distillation', False):
+            self._init_dynamic_autoregressive_resampler()
     def get_image_features(self, pixel_values, grid_thw):
         """
         Get image features from pixel values.
@@ -112,20 +110,18 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         )
         self.config.num_latent_tokens = num_latent_tokens
 
-    def _init_dit_reconstruction_head(self, dit_pretrained_path: Optional[str] = None):
-        """Initialize DiTReconstructionHead for pixel reconstruction conditioned on LLM 8 tokens."""
-        llm_hidden_size = self.config.hidden_size
-        dit_hidden_size = getattr(self.config, 'dit_hidden_size', 1152)  # DiT-XL-2 default
-        vae_repo = getattr(self.config, 'dit_vae_repo', 'stabilityai/sd-vae-ft-mse')
-        dit_crop_size = getattr(self.config, 'dit_crop_size', 128)
-        self.dit_recon_head = DiTReconstructionHead(
-            llm_hidden_size=llm_hidden_size,
-            dit_hidden_size=dit_hidden_size,
-            vae_repo=vae_repo,
-            dit_pretrained_path=dit_pretrained_path,
-            crop_size=dit_crop_size,
+    def _init_dynamic_autoregressive_resampler(self):
+        """Stage 2: Initialize DynamicAutoregressiveResampler (Student) and freeze BoxFeatureResampler (Teacher)."""
+        if not hasattr(self, 'box_feature_resampler'):
+            raise ValueError("use_stage2_distillation requires use_box_feature_resampler=True")
+        num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
+        self.student_resampler = DynamicAutoregressiveResampler(
+            hidden_size=self.config.hidden_size,
+            llm_hidden_size=self.config.hidden_size,
+            vision_dim=self.config.hidden_size,
+            num_queries=num_latent_tokens,
         )
-        self.config.dit_num_latent_tokens = getattr(self.config, 'dit_num_latent_tokens', 8)
+        self.box_feature_resampler.requires_grad_(False)
 
     def _init_lvr_bbox_mlp(self, fixed_num_lvr_tokens: int = 16):
         """

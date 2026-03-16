@@ -57,19 +57,23 @@ def configure_vision_tower(model, training_args, compute_dtype, device):
     vision_tower = model.visual
     vision_tower.to(dtype=compute_dtype, device=device)
 
+    # Stage 3 E2E: unfreeze vision and merger for end-to-end reasoning
+    use_stage3 = getattr(model.config, 'use_stage3_e2e', False)
+    freeze_vision = training_args.freeze_vision_tower and not use_stage3
+    freeze_merger = training_args.freeze_merger and not use_stage3
     vision_model_params = model.visual.parameters()
-    set_requires_grad(vision_model_params, not training_args.freeze_vision_tower)
-    
-    # Handle merger specifically
+    set_requires_grad(vision_model_params, not freeze_vision)
     merger_params = model.visual.merger.parameters()
-    set_requires_grad(merger_params, not training_args.freeze_merger)
+    set_requires_grad(merger_params, not freeze_merger)
 
 def configure_llm(model, training_args):
+    # Stage 3 E2E: unfreeze LLM for end-to-end reasoning
+    use_stage3 = getattr(model.config, 'use_stage3_e2e', False)
+    freeze_llm = training_args.freeze_llm and not use_stage3
     lm_head = model.lm_head.parameters()
-    set_requires_grad(lm_head, not training_args.freeze_llm)
-
+    set_requires_grad(lm_head, not freeze_llm)
     llm_params = model.model.parameters()
-    set_requires_grad(llm_params, not training_args.freeze_llm)
+    set_requires_grad(llm_params, not freeze_llm)
 
 def configure_lvr_head(model, training_args):
     """Configure LVR head parameters - always trainable (not frozen)"""
@@ -89,20 +93,24 @@ def configure_lvr_head(model, training_args):
         total_params = model.lvr_latent_embeds.numel()
         rank0_print(f"[INFO] Learnable latent embeddings set to trainable (total params: {total_params}, shape: {model.lvr_latent_embeds.shape})")
     
-    # Configure BoxFeatureResampler (joint training with LLM)
+    # Configure BoxFeatureResampler (trainable unless Stage 2/3, then frozen - Stage 3 does not use BCM)
+    use_stage3 = getattr(model.config, 'use_stage3_e2e', False)
     if hasattr(model, 'box_feature_resampler') and model.box_feature_resampler is not None:
-        resampler_params = list(model.box_feature_resampler.parameters())
-        set_requires_grad(resampler_params, True)  # Resampler is trainable
-        total_params = sum(p.numel() for p in resampler_params if p.requires_grad)
-        rank0_print(f"[INFO] BoxFeatureResampler parameters set to trainable (total params: {total_params})")
+        if getattr(model.config, 'use_stage2_distillation', False) or use_stage3:
+            set_requires_grad(list(model.box_feature_resampler.parameters()), False)
+            rank0_print(f"[INFO] BoxFeatureResampler (BCM) frozen for Stage 2/3 (Stage 3: no BCM forward)")
+        else:
+            resampler_params = list(model.box_feature_resampler.parameters())
+            set_requires_grad(resampler_params, True)
+            total_params = sum(p.numel() for p in resampler_params if p.requires_grad)
+            rank0_print(f"[INFO] BoxFeatureResampler parameters set to trainable (total params: {total_params})")
 
-    # Configure DiT reconstruction head (trainable; VAE inside is frozen)
-    if hasattr(model, 'dit_recon_head') and model.dit_recon_head is not None:
-        dit_params = [p for p in model.dit_recon_head.parameters() if p.requires_grad]
-        set_requires_grad(dit_params, True)
-        total_params = sum(p.numel() for p in model.dit_recon_head.parameters() if p.requires_grad)
-        rank0_print(f"[INFO] DiT reconstruction head parameters set to trainable (total params: {total_params})")
-
+    # Configure DynamicAutoregressiveResampler (Stage 2 Student / Stage 3 DAR - always trainable for CE gradient flow)
+    if hasattr(model, 'student_resampler') and model.student_resampler is not None:
+        student_params = list(model.student_resampler.parameters())
+        set_requires_grad(student_params, True)
+        total_params = sum(p.numel() for p in student_params if p.requires_grad)
+        rank0_print(f"[INFO] DynamicAutoregressiveResampler (DAR) parameters set to trainable (total params: {total_params})")
 
 def train():
     global local_rank
@@ -227,20 +235,19 @@ def train():
 
     # BoxFeatureResampler: fixed num latent tokens per bbox for MSE target
     config.use_box_feature_resampler = getattr(model_args, 'use_box_feature_resampler', False)
+    config.use_stage2_distillation = getattr(model_args, 'use_stage2_distillation', False)
+    config.use_stage3_e2e = getattr(model_args, 'use_stage3_e2e', False)
+    if config.use_stage2_distillation and not config.use_box_feature_resampler:
+        config.use_box_feature_resampler = True  # Stage 2 requires BoxFeatureResampler as Teacher
+    if config.use_stage3_e2e and not config.use_box_feature_resampler:
+        raise ValueError("use_stage3_e2e requires use_box_feature_resampler=True (load from Stage 2 checkpoint with student_resampler)")
     config.num_latent_tokens = getattr(model_args, 'num_latent_tokens', 8)
     if config.use_box_feature_resampler:
         rank0_print(f"[INFO] BoxFeatureResampler enabled with num_latent_tokens={config.num_latent_tokens}")
-
-    # DiT pixel reconstruction head
-    config.use_dit_reconstruction = getattr(model_args, 'use_dit_reconstruction', False)
-    config.dit_pretrained_path = getattr(model_args, 'dit_pretrained_path', None)
-    config.dit_vae_repo = getattr(model_args, 'dit_vae_repo', 'stabilityai/sd-vae-ft-mse')
-    config.dit_hidden_size = getattr(model_args, 'dit_hidden_size', 384)
-    config.dit_num_latent_tokens = getattr(model_args, 'dit_num_latent_tokens', 8)
-    config.dit_condition_gt_prob = getattr(training_args, 'dit_condition_gt_prob', 0.5)
-    config.dit_crop_size = getattr(data_args, 'dit_crop_size', 128)
-    if config.use_dit_reconstruction:
-        rank0_print(f"[INFO] DiT reconstruction enabled: dit_pretrained_path={config.dit_pretrained_path}, dit_num_latent_tokens={config.dit_num_latent_tokens}, dit_condition_gt_prob={config.dit_condition_gt_prob}, dit_crop_size={config.dit_crop_size}")
+    if config.use_stage2_distillation:
+        rank0_print(f"[INFO] Stage 2 distillation enabled: DynamicAutoregressiveResampler (Student) + frozen BoxFeatureResampler (Teacher)")
+    if config.use_stage3_e2e:
+        rank0_print(f"[INFO] Stage 3 E2E enabled: CE loss only, no distillation. DAR in forward path for end-to-end reasoning unlock.")
 
     # Load model based on model type
     if "Qwen2.5" in model_args.model_id:
@@ -250,7 +257,7 @@ def train():
                                                         mode_switch_loss=training_args.mode_switch_loss,
                                                         latent_end_token=model_args.latent_end_token,
                                                         use_box_feature_resampler=getattr(model_args, 'use_box_feature_resampler', False),
-                                                        use_dit_reconstruction=getattr(model_args, 'use_dit_reconstruction', False))
+                                                        use_stage2_distillation=getattr(model_args, 'use_stage2_distillation', False))
         
         model = QwenWithLVR.from_pretrained(
             model_pth,
@@ -298,9 +305,9 @@ def train():
     configure_llm(model_to_configure, training_args)
     configure_vision_tower(model_to_configure, training_args, compute_dtype, training_args.device)
     
-    # Configure LVR head and/or BoxFeatureResampler and/or DiT reconstruction head
-    if model_args.lvr_head or getattr(model_args, 'use_box_feature_resampler', False) or getattr(model_args, 'use_dit_reconstruction', False):
-        configure_lvr_head(model, training_args)  # Ensure LVR head / resampler / dit_recon_head is trainable
+    # Configure LVR head and/or BoxFeatureResampler
+    if model_args.lvr_head or getattr(model_args, 'use_box_feature_resampler', False) or getattr(model_args, 'use_stage2_distillation', False) or getattr(model_args, 'use_stage3_e2e', False):
+        configure_lvr_head(model, training_args)  # Ensure LVR head / resampler is trainable
 
     ''' NaN sanitizer: Hook the patch-emb with torch.nan_to_num() '''
     # def output_nan_sanitizer_hook(module, input, output):
@@ -342,6 +349,10 @@ def train():
     model.config.loss_lvr_fct = training_args.loss_lvr_fct
     # configure loss control flags
     model.config.use_mse_loss = training_args.use_mse_loss
+    model.config.loss_ortho_lambda = training_args.loss_ortho_lambda
+    model.config.loss_attn_lambda = training_args.loss_attn_lambda
+    model.config.loss_attn_transfer_lambda = training_args.loss_attn_transfer_lambda
+    model.config.loss_attn_div_lambda = training_args.loss_attn_div_lambda
 
 
     '''
@@ -403,7 +414,13 @@ def train():
     try:
         # If resume_from_checkpoint is provided via TrainingArguments (e.g. from CLI),
         # explicitly pass it to the Trainer so that optimizer/scheduler/global_step are restored.
-        trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
+        # Stage 2: When loading from Stage 1 checkpoint, the DeepSpeed checkpoint has different
+        # architecture (no student_resampler). Do NOT resume - only model was loaded via checkpoint_name.
+        resume_ckpt = training_args.resume_from_checkpoint
+        if getattr(model_args, 'use_stage2_distillation', False) and resume_ckpt:
+            rank0_print(f"[INFO] Stage 2 distillation: skipping resume_from_checkpoint (Stage 1 ckpt has different arch). Model loaded from checkpoint_name.")
+            resume_ckpt = None
+        trainer.train(resume_from_checkpoint=resume_ckpt)
     except KeyboardInterrupt:
         rank0_print("\n[ERROR] Training interrupted by user")
         traceback.print_exc()

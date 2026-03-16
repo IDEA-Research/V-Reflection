@@ -891,8 +891,9 @@ class QwenGRPOTrainer(Trainer):
                         **multimodal_inputs
                     )
 
-        # Decode the generated completions
-        completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+        # Decode the generated completions. Use skip_special_tokens=False so that LVR tokens
+        # (<|lvr_start|>, <|lvr|>, <|lvr_end|>) are preserved for format_reward to match.
+        completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=False)
         if is_conversational(inputs[0]):
             completions = []
             for prompt, completion in zip(prompts, completions_text):

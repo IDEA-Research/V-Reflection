@@ -26,7 +26,11 @@ export NCCL_IB_DISABLE=0  # 启用 InfiniBand（如果可用）
 export NCCL_DEBUG=WARN  # 设置为 WARN 以减少日志输出（调试时可设为 INFO）
 
 export WANDB_MODE="${WANDB_MODE:-online}"
-export WANDB_PROJECT="${WANDB_PROJECT:-Dynamic-Coconut-GRPO}"
+export WANDB_API_KEY=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
+export WANDB_PROJECT="${WANDB_PROJECT:-Dynamic-Coconut}"
+# REPORT_TO must be non-empty: wandb or none. Avoids --report_to with no value.
+REPORT_TO="${REPORT_TO:-wandb}"
+
 
 # ============================================================================
 # Model Configuration
@@ -38,8 +42,7 @@ MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 # ============================================================================
 # Stage-1 checkpoint path (required for GRPO training)
 # Can be overridden via STAGE1_CHECKPOINT env var
-STAGE1_STEPS="${STAGE1_STEPS:-1500}"
-STAGE1_CHECKPOINT="${STAGE1_CHECKPOINT:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/intrinsic-similarity/SFT_steps2500_b1_mseLVR0.1_acc8_MSETrue_TripletFalse/checkpoint-${STAGE1_STEPS}/}"
+STAGE1_CHECKPOINT="${STAGE1_CHECKPOINT:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/stage2_distillation/SFT_stage2_distillation_steps2500_b4_LVR0.1_resampler0.1_attnTransfer1.0_acc8_latent8/checkpoint-900}"
 
 # ============================================================================
 # Data Configuration
@@ -129,6 +132,7 @@ echo "  Freeze merger: $FREEZE_MERGER"
 echo "  Freeze LLM: $FREEZE_LLM"
 echo "  Wandb Project: $WANDB_PROJECT"
 echo "  Wandb Mode: $WANDB_MODE"
+echo "  Report to: $REPORT_TO"
 echo "  Output Dir: $OUTPUT_DIR"
 echo "=========================================="
 
@@ -170,14 +174,15 @@ DEEPSPEED_CMD="deepspeed --master_port=$MASTER_PORT src/train/train_grpo.py \
     --logging_steps 1 \
     --tf32 False \
     --gradient_checkpointing True \
-    --report_to wandb \
+    --report_to $REPORT_TO \
     --lazy_preprocess True \
     --save_strategy \"steps\" \
     --save_steps 100 \
     --save_total_limit 50 \
     --dataloader_num_workers 8 \
     --decoding_strategy $DECODING_STRATEGY \
-    --lvr_steps $LVR_STEPS"
+    --lvr_steps $LVR_STEPS \
+    --reward_weights 1.0 1.0"
 
 # Add min_p parameter if set
 if [ -n "$MIN_P" ]; then

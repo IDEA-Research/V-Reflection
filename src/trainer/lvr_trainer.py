@@ -259,7 +259,6 @@ class QwenLVRSFTTrainer(Trainer):
         self._current_model = model  # Store for debug logging
         
         # Filter out debug keys before passing to model
-        # cropped_bbox_images is needed for DiT reconstruction loss when use_dit_reconstruction is enabled
         model_inputs = {k: v for k, v in inputs.items() if not k.startswith('_debug_')}
         
         # Helper: current rank for debug prints (so we know which rank had the issue)
@@ -360,7 +359,8 @@ class QwenLVRSFTTrainer(Trainer):
                     self.loss_ce = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss_lvr = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss_lvr_resampler = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
-                    self.loss_dit_recon = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+                    self.loss_ortho = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
+                    self.loss_attn_div = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss_mode_switch = torch.tensor(0.0, device=device, dtype=dtype, requires_grad=True)
                     self.loss = zero_loss
             
@@ -376,7 +376,10 @@ class QwenLVRSFTTrainer(Trainer):
         loss_ce = outputs.loss_ce
         loss_lvr = outputs.loss_lvr
         loss_lvr_resampler = getattr(outputs, 'loss_lvr_resampler', None)
-        loss_dit_recon = getattr(outputs, 'loss_dit_recon', None)
+        loss_ortho = getattr(outputs, 'loss_ortho', None)
+        loss_attn_div = getattr(outputs, 'loss_attn_div', None)
+        loss_attn_guidance = getattr(outputs, 'loss_attn_guidance', None)
+        loss_attn_transfer = getattr(outputs, 'loss_attn_transfer', None)
         loss_mode_switch = outputs.loss_mode_switch
 
         # NaN detection and protection for individual loss components
@@ -437,28 +440,41 @@ class QwenLVRSFTTrainer(Trainer):
             else:
                 loss_lvr_resampler = torch.clamp(loss_lvr_resampler, min=0.0, max=MAX_LOSS_VALUE)
 
-        if loss_dit_recon is not None:
-            if torch.isnan(loss_dit_recon) or torch.isinf(loss_dit_recon):
+        if loss_ortho is not None:
+            if torch.isnan(loss_ortho) or torch.isinf(loss_ortho):
                 rank = _rank()
-                self._log_debug_info(inputs, "loss_dit_recon")
+                self._log_debug_info(inputs, "loss_ortho")
                 print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
-                      f"loss_dit_recon is NaN/Inf: {loss_dit_recon.item()}, replacing with 0.0", flush=True)
-                loss_dit_recon = torch.nan_to_num(loss_dit_recon, nan=0.0, posinf=0.0, neginf=0.0)
+                      f"loss_ortho is NaN/Inf: {loss_ortho.item()}, replacing with 0.0", flush=True)
+                loss_ortho = torch.nan_to_num(loss_ortho, nan=0.0, posinf=0.0, neginf=0.0)
             else:
-                loss_dit_recon = torch.clamp(loss_dit_recon, min=0.0, max=MAX_LOSS_VALUE)
-        
+                loss_ortho = torch.clamp(loss_ortho, min=0.0, max=MAX_LOSS_VALUE)
+
+        if loss_attn_div is not None:
+            if torch.isnan(loss_attn_div) or torch.isinf(loss_attn_div):
+                rank = _rank()
+                self._log_debug_info(inputs, "loss_attn_div")
+                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
+                      f"loss_attn_div is NaN/Inf: {loss_attn_div.item()}, replacing with 0.0", flush=True)
+                loss_attn_div = torch.nan_to_num(loss_attn_div, nan=0.0, posinf=0.0, neginf=0.0)
+            else:
+                loss_attn_div = torch.clamp(loss_attn_div, min=0.0, max=MAX_LOSS_VALUE)
+
+        # Stage 3 E2E: only CE loss, no auxiliary distillation losses
+        use_stage3_e2e = getattr(self.model.config, 'use_stage3_e2e', False) if hasattr(self.model, 'config') else False
+        if hasattr(self.model, 'module') and hasattr(self.model.module, 'config'):
+            use_stage3_e2e = getattr(self.model.module.config, 'use_stage3_e2e', False)
+        if use_stage3_e2e:
+            loss = loss_ce
         # Build combined loss based on enabled losses and their weights
-        if self.args.mode_switch_loss:
+        elif self.args.mode_switch_loss:
             loss = loss_ce
             # Add MSE loss if enabled and weight > 0
             if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
                 loss = loss + self.args.loss_lvr_lambda * loss_lvr
-            # Add BoxFeatureResampler MSE loss if enabled
+            # Add BoxFeatureResampler MSE loss if enabled (includes loss_ortho baked in for gradient flow)
             if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
                 loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
-            # Add DiT reconstruction loss if enabled
-            if loss_dit_recon is not None and getattr(self.args, 'loss_dit_recon_lambda', 0.0) > 0:
-                loss = loss + self.args.loss_dit_recon_lambda * loss_dit_recon
             # Add mode switch loss if enabled and weight > 0
             if loss_mode_switch is not None and self.args.loss_mode_switch_lambda > 0:
                 loss = loss + self.args.loss_mode_switch_lambda * loss_mode_switch
@@ -468,13 +484,9 @@ class QwenLVRSFTTrainer(Trainer):
             # Add MSE loss if enabled and weight > 0
             if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
                 loss = loss + self.args.loss_lvr_lambda * loss_lvr
-            # Add BoxFeatureResampler MSE loss if enabled
+            # Add BoxFeatureResampler MSE loss if enabled (includes loss_ortho baked in for gradient flow)
             if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
                 loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
-            # Add DiT reconstruction loss if enabled
-            if loss_dit_recon is not None and getattr(self.args, 'loss_dit_recon_lambda', 0.0) > 0:
-                loss = loss + self.args.loss_dit_recon_lambda * loss_dit_recon
-
         # Final NaN check and protection for combined loss
         if torch.isnan(loss) or torch.isinf(loss):
             rank = _rank()
@@ -485,7 +497,8 @@ class QwenLVRSFTTrainer(Trainer):
             print(f"[TRAIN.compute_loss] rank={rank} components: loss_ce={loss_ce.item() if loss_ce is not None else 'None'}, "
                   f"loss_lvr={loss_lvr.item() if loss_lvr is not None else 'None'}, "
                   f"loss_lvr_resampler={loss_lvr_resampler.item() if loss_lvr_resampler is not None else 'None'}, "
-                  f"loss_dit_recon={loss_dit_recon.item() if loss_dit_recon is not None else 'None'}, "
+                  f"loss_ortho={loss_ortho.item() if loss_ortho is not None else 'None'}, "
+                  f"loss_attn_div={loss_attn_div.item() if loss_attn_div is not None else 'None'}, "
                   f"loss_mode_switch={loss_mode_switch.item() if loss_mode_switch is not None else 'None'}", flush=True)
             # Fallback to loss_ce only if combined loss is NaN
             loss = loss_ce if loss_ce is not None else torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
@@ -499,7 +512,15 @@ class QwenLVRSFTTrainer(Trainer):
             loss_ce_val = loss_ce.detach().item() if loss_ce is not None else 0.0
             loss_lvr_val = loss_lvr.detach().item() if loss_lvr is not None else 0.0
             loss_lvr_resampler_val = loss_lvr_resampler.detach().item() if loss_lvr_resampler is not None else 0.0
-            loss_dit_recon_val = loss_dit_recon.detach().item() if loss_dit_recon is not None else 0.0
+            loss_ortho_val = loss_ortho.detach().item() if loss_ortho is not None else 0.0
+            loss_attn_div_val = loss_attn_div.detach().item() if loss_attn_div is not None else 0.0
+            # When lambda=0, log 0 to indicate the term is disabled (not used in combined loss)
+            if getattr(self.args, 'loss_ortho_lambda', 0.1) == 0:
+                loss_ortho_val = 0.0
+            if getattr(self.args, 'loss_attn_div_lambda', 0.0) == 0:
+                loss_attn_div_val = 0.0
+            loss_attn_guidance_val = loss_attn_guidance.detach().item() if loss_attn_guidance is not None else 0.0
+            loss_attn_transfer_val = loss_attn_transfer.detach().item() if loss_attn_transfer is not None else 0.0
             loss_mode_switch_val = loss_mode_switch.detach().item() if loss_mode_switch is not None else 0.0
             
             # Check for NaN before logging
@@ -541,7 +562,10 @@ class QwenLVRSFTTrainer(Trainer):
             loss_ce_val = 0.0
             loss_lvr_val = 0.0
             loss_lvr_resampler_val = 0.0
-            loss_dit_recon_val = 0.0
+            loss_ortho_val = 0.0
+            loss_attn_div_val = 0.0
+            loss_attn_guidance_val = 0.0
+            loss_attn_transfer_val = 0.0
             loss_mode_switch_val = 0.0
             # Try to use loss_ce if available
             try:
@@ -561,14 +585,17 @@ class QwenLVRSFTTrainer(Trainer):
         if step is not None and step % 100 == 0 and step > 0:
             rank = _rank()
             print(f"[TRAIN.compute_loss] rank={rank} step={step} | loss_total={loss_total_val:.6f} loss_ce={loss_ce_val:.6f} "
-                  f"loss_lvr={loss_lvr_val:.6f} loss_lvr_resampler={loss_lvr_resampler_val:.6f} loss_dit_recon={loss_dit_recon_val:.6f} loss_mode_switch={loss_mode_switch_val:.6f}", flush=True)
+                  f"loss_lvr={loss_lvr_val:.6f} loss_lvr_resampler={loss_lvr_resampler_val:.6f} loss_ortho={loss_ortho_val:.6f} loss_attn_div={loss_attn_div_val:.6f} loss_attn_guidance={loss_attn_guidance_val:.6f} loss_attn_transfer={loss_attn_transfer_val:.6f} loss_mode_switch={loss_mode_switch_val:.6f}", flush=True)
 
         self.log({
             "loss_total": loss_total_val,
             "loss_ce": loss_ce_val,
             "loss_lvr": loss_lvr_val,
             "loss_lvr_resampler": loss_lvr_resampler_val,
-            "loss_dit_recon": loss_dit_recon_val,
+            "loss_ortho": loss_ortho_val,
+            "loss_attn_div": loss_attn_div_val,
+            "loss_attn_guidance": loss_attn_guidance_val,
+            "loss_attn_transfer": loss_attn_transfer_val,
             "loss_mode_switch": loss_mode_switch_val,
         })
 

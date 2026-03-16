@@ -43,13 +43,13 @@ def replace_qwen2_5_with_mixed_modality_forward_lvr(inference_mode=False,
                                                     mode_switch_loss=False,
                                                     latent_end_token=False,
                                                     use_box_feature_resampler=False,
-                                                    use_dit_reconstruction=False,
+                                                    use_stage2_distillation=False,
                                                     rl=False):
     
     if inference_mode:
         if lvr_head:
             transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_lvr_with_head_inference
-        elif use_box_feature_resampler or use_dit_reconstruction:
+        elif use_box_feature_resampler or use_stage2_distillation:
             transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_lvr_with_resampler_inference
         else:
             transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_lvr_inference
@@ -58,7 +58,7 @@ def replace_qwen2_5_with_mixed_modality_forward_lvr(inference_mode=False,
     else:
         if latent_end_token and lvr_head:
             transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken
-        elif (latent_end_token or use_box_feature_resampler or use_dit_reconstruction) and not lvr_head:
+        elif (latent_end_token or use_box_feature_resampler or use_stage2_distillation) and not lvr_head:
             transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_lvr_with_latentEndToken
         elif mode_switch_loss:
             transformers.models.qwen2_5_vl.modeling_qwen2_5_vl.Qwen2_5_VLForConditionalGeneration.forward = qwen2_5_mixed_modality_forward_lvr_with_head_with_modeSwitchLoss
@@ -149,7 +149,6 @@ def qwen2_5_mixed_modality_forward_lvr(
     lvr_tokens_thw: Optional[List[torch.Tensor]] = None,      # This is for TRAINING: Where should the lvr img tokens be
     lvr_mode_switch: Optional[torch.Tensor] = None, # This is for INFERENCE: Which instance in the batch is in lvr mode
     last_position_hidden_state: Optional[torch.FloatTensor] = None, # This is for INFERENCE: last hidden state of the last position
-    cropped_bbox_images: Optional[torch.Tensor] = None,  # Not used in this forward, but accept for interface compatibility
 ) -> Union[Tuple, "Qwen2_5_VLCausalLMOutputWithPast"]:
     
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -322,10 +321,8 @@ def qwen2_5_mixed_modality_forward_lvr(
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             )
             if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-                # FIX: Use self.get_rope_index() instead of self.model.get_rope_index()
-                # self = Qwen2_5_VLForConditionalGeneration/QwenWithLVR (has get_rope_index)
-                # self.model = Qwen2_5_VLModel (does NOT have get_rope_index)
-                position_ids, rope_deltas = self.get_rope_index(
+                # get_rope_index is on Qwen2_5_VLModel (self.model), not on ForConditionalGeneration
+                position_ids, rope_deltas = self.model.get_rope_index(
                     input_ids,
                     image_grid_thw,
                     video_grid_thw,
@@ -589,7 +586,10 @@ class Qwen2_5_VLCausalLMOutputWithPast(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
     loss_lvr: Optional[torch.FloatTensor] = None
     loss_lvr_resampler: Optional[torch.FloatTensor] = None
-    loss_dit_recon: Optional[torch.FloatTensor] = None
+    loss_ortho: Optional[torch.FloatTensor] = None
+    loss_attn_div: Optional[torch.FloatTensor] = None
+    loss_attn_guidance: Optional[torch.FloatTensor] = None
+    loss_attn_transfer: Optional[torch.FloatTensor] = None
     loss_ce: Optional[torch.FloatTensor] = None
     loss_mode_switch: Optional[torch.FloatTensor] = None
     logits: Optional[torch.FloatTensor] = None
@@ -671,6 +671,66 @@ def _prepare_bbox_region_features(
     bbox_region_features = torch.stack(batch_list, dim=0).to(dtype=dtype)
     key_padding_mask = torch.stack(mask_out_list, dim=0)
     return bbox_region_features, key_padding_mask
+
+
+def create_spatial_mask_from_lvr_tokens(
+    lvr_tokens: list,
+    batch_indices_per_bbox: torch.Tensor,
+    image_grid_thw: torch.Tensor,
+    max_seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Create spatial mask from lvr_tokens (bbox token indices).
+    lvr_tokens[i] corresponds to the image at batch_indices_per_bbox[i].
+    image_grid_thw: [batch_size, 3] as [T, H, W]; tokens per image = H*W//4.
+    Returns: spatial_mask [num_bboxes, max_seq_len], 1.0=inside bbox, 0.0=background.
+    """
+    num_bboxes = len(lvr_tokens)
+    if num_bboxes == 0:
+        return torch.zeros(0, max_seq_len, device=device, dtype=torch.float32)
+    spatial_masks = torch.zeros((num_bboxes, max_seq_len), device=device, dtype=torch.float32)
+    for i in range(num_bboxes):
+        batch_idx = batch_indices_per_bbox[i].item()
+        seq_len = image_grid_thw[batch_idx, 1].item() * image_grid_thw[batch_idx, 2].item() // 4
+        local_idx = lvr_tokens[i]
+        if isinstance(local_idx, (list, tuple)):
+            local_idx = torch.tensor(local_idx, device=device, dtype=torch.long)
+        else:
+            local_idx = local_idx.to(device=device)
+        for idx in local_idx.tolist():
+            if 0 <= idx < seq_len and idx < max_seq_len:
+                spatial_masks[i, idx] = 1.0
+    return spatial_masks
+
+
+def get_aligned_teacher_attn_from_lvr_tokens(
+    teacher_attn: torch.Tensor,
+    lvr_tokens: list,
+    key_padding_mask: torch.Tensor,
+    max_seq_len: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Map teacher's local bbox attention [B, 8, max_N] to full-image [B, 8, max_seq_len].
+    teacher_attn[i,:,j] corresponds to lvr_tokens[i][j]; key_padding_mask marks padding.
+    """
+    B, num_queries, _ = teacher_attn.shape
+    aligned_attn = torch.zeros((B, num_queries, max_seq_len), device=device, dtype=teacher_attn.dtype)
+    for i in range(B):
+        num_valid = (~key_padding_mask[i]).sum().item()
+        if num_valid == 0:
+            continue
+        local_idx = lvr_tokens[i]
+        if isinstance(local_idx, (list, tuple)):
+            local_idx = torch.tensor(local_idx, device=device, dtype=torch.long)
+        else:
+            local_idx = local_idx.to(device=device)
+        valid_indices = local_idx[:num_valid]
+        mask = valid_indices < max_seq_len
+        if mask.any():
+            aligned_attn[i, :, valid_indices[mask]] = teacher_attn[i, :, :num_valid][:, mask]
+    return aligned_attn
 
 
 def qwen2_5_mixed_modality_forward_lvr_inference(
@@ -862,7 +922,7 @@ def qwen2_5_mixed_modality_forward_lvr_inference(
                 or (past_key_values is None or past_key_values.get_seq_length() == 0)
             )
             if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-                position_ids, rope_deltas = self.get_rope_index(
+                position_ids, rope_deltas = self.model.get_rope_index(
                     input_ids,
                     image_grid_thw,
                     video_grid_thw,
@@ -984,13 +1044,12 @@ def qwen2_5_mixed_modality_forward_lvr_inference(
 
 
 '''
-    Inference mode with BoxFeatureResampler / DiT Recon (no LVR head).
-    This forward function is used for inferencing models trained with use_box_feature_resampler=True or use_dit_reconstruction=True.
+    Inference mode with BoxFeatureResampler (no LVR head).
+    This forward function is used for inferencing models trained with use_box_feature_resampler=True.
     
     Key differences from qwen2_5_mixed_modality_forward_lvr_inference:
     - In LVR mode, uses box_feature_resampler to process hidden states
     - Saves image_embeds during prefill for use during LVR thinking steps
-    - For DiT Recon models: can generate images from LLM hidden states using DiT
 '''
 def qwen2_5_mixed_modality_forward_lvr_with_resampler_inference(
     self,
@@ -1018,9 +1077,8 @@ def qwen2_5_mixed_modality_forward_lvr_with_resampler_inference(
     **kwargs,
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
     """
-    Inference forward for BoxFeatureResampler / DiT Recon models.
+    Inference forward for BoxFeatureResampler models.
     In LVR mode, uses box_feature_resampler to enhance hidden states if available.
-    For DiT Recon models, can generate images using DiT conditioned on LLM hidden states.
     """
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
     output_hidden_states = (
@@ -1089,7 +1147,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_resampler_inference(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
@@ -1127,96 +1185,8 @@ def qwen2_5_mixed_modality_forward_lvr_with_resampler_inference(
     
     # NOTE: Do NOT apply box_feature_resampler enhancement to hidden states here.
     # Training behavior: resampler output is used to FILL INPUT EMBEDDINGS at LVR positions,
-    # NOT to modify OUTPUT hidden states. The DiT condition comes from raw transformer output.
-    # Inference: we use last_position_hidden_state as input for next step (Coconut style),
-    # and collect raw hidden states for DiT without any post-processing enhancement.
-    
-    # DiT image generation: collect hidden states ONLY during LVR mode and generate images.
-    # This matches training behavior where DiT condition comes from 8 <lvr> position hidden states.
-    # Triggered by environment variable DIT_GENERATE_IMAGES=1
-    dit_generated_images = None
-    dit_enabled = os.environ.get('DIT_GENERATE_IMAGES', '0') == '1'
-    has_dit_head = hasattr(self, 'dit_recon_head') and self.dit_recon_head is not None
-    
-    if dit_enabled and lvr_mode_switch is not None and has_dit_head:
-        if lvr_mode_switch.any():
-            lvr_batch_indices = torch.nonzero(lvr_mode_switch, as_tuple=True)[0]
-            
-            if len(lvr_batch_indices) > 0:
-                num_latent_tokens = getattr(self.config, 'dit_num_latent_tokens', getattr(self.config, 'num_latent_tokens', 8))
-                
-                if not hasattr(self, '_dit_lvr_hidden_buffer'):
-                    self._dit_lvr_hidden_buffer = {}
-                    self._dit_lvr_step_counter = {}
-                
-                for b_idx in lvr_batch_indices:
-                    b_idx_int = b_idx.item()
-                    
-                    if b_idx_int not in self._dit_lvr_hidden_buffer:
-                        self._dit_lvr_hidden_buffer[b_idx_int] = []
-                        self._dit_lvr_step_counter[b_idx_int] = 0
-                    
-                    self._dit_lvr_hidden_buffer[b_idx_int].append(last_position_hidden_state[b_idx].clone())
-                    self._dit_lvr_step_counter[b_idx_int] += 1
-                    
-                    if self._dit_lvr_step_counter[b_idx_int] >= num_latent_tokens:
-                        llm_tokens = torch.stack(self._dit_lvr_hidden_buffer[b_idx_int][-num_latent_tokens:], dim=0)
-                        llm_tokens = llm_tokens.unsqueeze(0)
-                        
-                        try:
-                            num_inference_steps = int(os.environ.get('DIT_NUM_INFERENCE_STEPS', '20'))
-                            generated_img = self.dit_recon_head.generate(
-                                llm_tokens,
-                                num_inference_steps=num_inference_steps,
-                                return_intermediate=False
-                            )
-                            
-                            save_dir = os.environ.get('DIT_SAVE_DIR', None)
-                            if save_dir:
-                                os.makedirs(save_dir, exist_ok=True)
-                                # Use _dit_sample_idx set by evaluation.py (real sample index);
-                                # do NOT increment here — one sample produces one image.
-                                sample_idx = getattr(self, '_dit_sample_idx', 0)
-                                benchmark_name = getattr(self, '_dit_benchmark_name', '')
-                                step_num = self._dit_lvr_step_counter[b_idx_int]
-                                
-                                img_np = ((generated_img[0].permute(1, 2, 0).cpu().float().numpy() + 1) * 127.5).clip(0, 255).astype('uint8')
-                                
-                                try:
-                                    from PIL import Image
-                                    img_pil = Image.fromarray(img_np)
-                                    # Format sample_idx: use zero-padded int if possible, otherwise use string directly
-                                    if isinstance(sample_idx, int):
-                                        idx_str = f'{sample_idx:06d}'
-                                    else:
-                                        # sample_idx may be a string (e.g. BLINK question_id)
-                                        try:
-                                            idx_str = f'{int(sample_idx):06d}'
-                                        except (ValueError, TypeError):
-                                            idx_str = str(sample_idx)
-                                    # Include benchmark name prefix to avoid filename collision across datasets
-                                    if benchmark_name:
-                                        save_path = os.path.join(save_dir, f'{benchmark_name}_dit_lvr_{idx_str}_step{step_num}.png')
-                                    else:
-                                        save_path = os.path.join(save_dir, f'dit_lvr_{idx_str}_step{step_num}.png')
-                                    img_pil.save(save_path)
-                                    if os.environ.get('DIT_DEBUG', '0') == '1':
-                                        print(f"[DiT LVR] Saved generated image to {save_path} (sample={sample_idx}, benchmark={benchmark_name}, lvr_steps={step_num})", flush=True)
-                                except Exception as e:
-                                    if os.environ.get('DIT_DEBUG', '0') == '1':
-                                        print(f"[DiT LVR] Failed to save image: {e}", flush=True)
-                            
-                            if dit_generated_images is None:
-                                dit_generated_images = []
-                            dit_generated_images.append(generated_img)
-                            
-                        except Exception as e:
-                            if os.environ.get('DIT_DEBUG', '0') == '1':
-                                print(f"[DiT LVR] Generation failed: {e}", flush=True)
-                        
-                        # Reset buffer after generating (matches training: one condition per bbox)
-                        self._dit_lvr_hidden_buffer[b_idx_int] = []
-                        self._dit_lvr_step_counter[b_idx_int] = 0
+    # NOT to modify OUTPUT hidden states.
+    # Inference: we use last_position_hidden_state as input for next step (Coconut style).
 
     logits = self.lm_head(hidden_states)
 
@@ -1268,7 +1238,6 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
     lvr_tokens_thw: Optional[List[torch.Tensor]] = None,      # This is for TRAINING: Where should the lvr img tokens be
     lvr_mode_switch: Optional[torch.Tensor] = None, # This is for INFERENCE: Which instance in the batch is in lvr mode
     last_position_hidden_state: Optional[torch.FloatTensor] = None, # This is for INFERENCE: last hidden state of the last position
-    cropped_bbox_images: Optional[torch.Tensor] = None,  # (num_bboxes, 3, crop_size, crop_size) for DiT reconstruction
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
     
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -1401,7 +1370,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
@@ -1762,7 +1731,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_inference(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
@@ -2139,7 +2108,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_modeSwitchLoss(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
@@ -2368,7 +2337,6 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
     lvr_tokens: Optional[torch.Tensor] = None,      # This is for TRAINING: Where should the lvr img tokens be
     lvr_mode_switch: Optional[torch.Tensor] = None, # This is for INFERENCE: Which instance in the batch is in lvr mode
     last_position_hidden_state: Optional[torch.FloatTensor] = None, # This is for INFERENCE: last hidden state of the last position
-    cropped_bbox_images: Optional[torch.Tensor] = None,  # (num_bboxes, 3, crop_size, crop_size) for DiT reconstruction
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
     
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -2497,7 +2465,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
@@ -2628,7 +2596,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
     loss_ce = None
     loss_lvr = None
     loss_lvr_resampler = None
-    loss_dit_recon = None
+    loss_ortho = None
+    loss_attn_div = None
+    loss_attn_guidance = None
+    loss_attn_transfer = None
     if labels is not None:
         # Upcast to float if we need to compute the loss to avoid potential precision issues
         logits = logits.float()
@@ -2639,8 +2610,13 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
         loss_fct = CrossEntropyLoss()
         shift_logits = shift_logits.view(-1, self.config.vocab_size)
         shift_labels = shift_labels.view(-1)
-        # Don't want CE loss for <lvr> token
-        shift_labels = shift_labels.masked_fill((shift_labels == self.config.lvr_id)|(shift_labels == self.config.lvr_latent_end_id), IGNORE_INDEX)
+        # Stage 1: keep CE loss for <lvr> so model learns to predict correct token sequence (fixes lvr_end collapse).
+        # Stage 2: mask both lvr and lvr_latent_end to avoid double-counting with Student MSE.
+        # Stage 3 E2E: only CE on text tokens (mask lvr and lvr_latent_end, same as Stage 2)
+        if getattr(self.config, 'use_stage3_e2e', False) or getattr(self.config, 'use_stage2_distillation', False):
+            shift_labels = shift_labels.masked_fill((shift_labels == self.config.lvr_id)|(shift_labels == self.config.lvr_latent_end_id), IGNORE_INDEX)
+        else:
+            shift_labels = shift_labels.masked_fill(shift_labels == self.config.lvr_latent_end_id, IGNORE_INDEX)
 
         # Enable model parallelism
         shift_labels = shift_labels.to(shift_logits.device)
@@ -2674,11 +2650,12 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
             selected_lvr_embeds_latentend = selected_lvr_embeds_latentend.to(selected_hidden_states_latentend.device)
             loss_mode_switch = mode_switch_loss_fct(selected_hidden_states_latentend, selected_lvr_embeds_latentend)
 
-        # BoxFeatureResampler: fixed N latent MSE (target detached, only LLM optimized). Includes the last slot, which overlaps with loss_mode_switch (see above).
-        # When use_box_feature_resampler is enabled, always return a valid loss tensor (0.0 if cannot compute)
+        # BoxFeatureResampler / Stage 2 distillation: fixed N latent MSE. Stage 2: Teacher frozen, Student (DynamicAutoregressiveResampler) aligns to Target.
+        # When use_box_feature_resampler or use_stage2_distillation is enabled, always return a valid loss tensor (0.0 if cannot compute)
         # This ensures consistent gradient sync across all ranks in distributed training
         _resampler_output_for_dit = None  # Save resampler output for DiT condition (50/50 GT mechanism)
-        if getattr(self.config, 'use_box_feature_resampler', False) and hasattr(self, 'box_feature_resampler'):
+        use_stage2 = getattr(self.config, 'use_stage2_distillation', False)
+        if (getattr(self.config, 'use_box_feature_resampler', False) or (use_stage2 and hasattr(self, 'student_resampler'))) and hasattr(self, 'box_feature_resampler'):
             num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
             
             # Check if we have valid data to compute resampler loss
@@ -2696,76 +2673,131 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
                         device=hidden_states.device, dtype=next(self.box_feature_resampler.parameters()).dtype,
                     )
                     if bbox_feats.shape[0] > 0 and bbox_feats.shape[1] > 0:
-                        # Joint training: bidirectional symmetric loss to prevent "cheating"
-                        # resampler_output has gradients (resampler is trainable)
-                        resampler_output = self.box_feature_resampler(bbox_feats, key_padding_mask=key_pad_mask)
-                        _resampler_output_for_dit = resampler_output  # Save for DiT 50/50 GT condition
-                        seq_positions_start = seq_positions - 1
-                        llm_latent_8 = hidden_states[batch_indices, seq_positions_start].to(torch.float32)
-                        llm_latent_8 = llm_latent_8.view(num_bboxes, num_latent_tokens, -1)
-                        resampler_output = resampler_output.to(torch.float32)
-                        # Avoid NaN: skip loss if inputs contain NaN/Inf; clamp to reduce overflow
-                        if torch.isnan(llm_latent_8).any() or torch.isinf(llm_latent_8).any() or torch.isnan(resampler_output).any() or torch.isinf(resampler_output).any():
-                            loss_lvr_resampler = torch.tensor(0.0, device=llm_latent_8.device, dtype=torch.float32, requires_grad=True)
+                        if use_stage2 and hasattr(self, 'student_resampler'):
+                            # Stage 2: Teacher (frozen) -> target; Student (LLM hidden states as Q, full image as KV) -> predicted; MSE loss
+                            # Use hidden_states.dtype to match model compute dtype (bf16/fp16) - ZeRO-3 param dtype may be unreliable
+                            compute_dtype = hidden_states.dtype
+                            save_vis = os.environ.get("STAGE2_VIS_ATTENTION", "0") == "1" or getattr(self, "_vis_stage2_attention", False)
+                            need_teacher_attn = (
+                                getattr(self.config, 'loss_attn_transfer_lambda', 0.0) > 0 or save_vis
+                            )
+                            teacher_attn = None
+                            with torch.no_grad():
+                                if need_teacher_attn:
+                                    target_latent_tokens, teacher_attn = self.box_feature_resampler(
+                                        bbox_feats, key_padding_mask=key_pad_mask, return_attention=True
+                                    )
+                                else:
+                                    target_latent_tokens = self.box_feature_resampler(bbox_feats, key_padding_mask=key_pad_mask)
+                            _resampler_output_for_dit = target_latent_tokens  # For DiT 50/50 GT condition
+                            # LLM hidden states at 8 <lvr> positions (autoregressive outputs) - keep in model dtype for student_resampler
+                            lvr_hidden_states = hidden_states[batch_indices, seq_positions].to(compute_dtype)
+                            lvr_hidden_states = lvr_hidden_states.view(num_bboxes, num_latent_tokens, -1)
+                            # Full image features per bbox (batch_indices[0::8] gives one index per bbox)
+                            batch_indices_per_bbox = batch_indices[0::num_latent_tokens]
+                            full_image_features, image_attention_mask = _prepare_batched_image_embeds(
+                                image_embeds, total_tokens, batch_indices_per_bbox,
+                                target_dtype=compute_dtype,
+                            )
+                            key_padding_mask = ~image_attention_mask if image_attention_mask is not None else None
+                            predicted_latent_tokens, student_attn = self.student_resampler(
+                                lvr_hidden_states=lvr_hidden_states,
+                                full_image_features=full_image_features,
+                                key_padding_mask=key_padding_mask,
+                                return_attention=True,
+                            )
+                            if save_vis and teacher_attn is not None:
+                                self._stage2_vis_buffer = {
+                                    "teacher_attn": teacher_attn.detach().cpu().float(),
+                                    "student_attn": student_attn.detach().cpu().float(),
+                                    "lvr_tokens": [t.cpu() if isinstance(t, torch.Tensor) else t for t in lvr_tokens],
+                                    "batch_indices": batch_indices.cpu(),
+                                    "batch_indices_per_bbox": batch_indices_per_bbox.cpu(),
+                                    "image_grid_thw": image_grid_thw.cpu() if image_grid_thw is not None else None,
+                                    "total_tokens": total_tokens.cpu(),
+                                    "key_pad_mask": key_pad_mask.cpu() if key_pad_mask is not None else None,
+                                    "image_attention_mask": image_attention_mask.cpu() if image_attention_mask is not None else None,
+                                    "num_bboxes": num_bboxes,
+                                    "num_latent_tokens": num_latent_tokens,
+                                }
+                            predicted_latent_tokens = predicted_latent_tokens.to(torch.float32)
+                            target_latent_tokens = target_latent_tokens.to(torch.float32)
+                            if torch.isnan(predicted_latent_tokens).any() or torch.isinf(predicted_latent_tokens).any() or torch.isnan(target_latent_tokens).any() or torch.isinf(target_latent_tokens).any():
+                                loss_lvr_resampler = torch.tensor(0.0, device=predicted_latent_tokens.device, dtype=torch.float32, requires_grad=True)
+                                loss_attn_transfer = None
+                            else:
+                                loss_lvr_resampler = F.mse_loss(predicted_latent_tokens, target_latent_tokens.detach())
+                                # Pixel-level Attention Distillation: KL divergence to align Student with Teacher attention
+                                loss_attn_transfer = None
+                                loss_attn_transfer_lambda = getattr(self.config, 'loss_attn_transfer_lambda', 0.0)
+                                if loss_attn_transfer_lambda > 0 and teacher_attn is not None and student_attn is not None and key_pad_mask is not None:
+                                    seq_len_full = full_image_features.shape[1]
+                                    target_attn = get_aligned_teacher_attn_from_lvr_tokens(
+                                        teacher_attn.float(), lvr_tokens, key_pad_mask,
+                                        seq_len_full, hidden_states.device,
+                                    )
+                                    eps = 1e-9
+                                    student_attn_log = torch.log(student_attn.float() + eps)
+                                    loss_attn_transfer = F.kl_div(student_attn_log, target_attn, reduction='batchmean')
+                                    if not (torch.isnan(loss_attn_transfer) or torch.isinf(loss_attn_transfer)):
+                                        loss_lvr_resampler = loss_lvr_resampler + loss_attn_transfer_lambda * loss_attn_transfer
+                                    else:
+                                        loss_attn_transfer = None
+                            if loss_lvr_resampler is not None and (torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler)):
+                                loss_lvr_resampler = predicted_latent_tokens.sum() * 0.0
+                            elif loss_lvr_resampler is not None and os.environ.get("LVR_DEBUG", "0") == "1":
+                                print(f"[LVR.forward] rank={get_rank()} loss_lvr_resampler (Stage2)={loss_lvr_resampler.item():.6f} "
+                                      f"predicted shape={predicted_latent_tokens.shape} target shape={target_latent_tokens.shape}", flush=True)
                         else:
-                            llm_latent_8_clamped = torch.clamp(llm_latent_8, min=-1e4, max=1e4)
-                            resampler_output_clamped = torch.clamp(resampler_output, min=-1e4, max=1e4)
-                            # Bidirectional symmetric loss: each side only receives its own gradient
-                            loss_resampler = lvr_loss_fct(llm_latent_8_clamped.detach(), resampler_output_clamped)  # train resampler
-                            loss_llm = lvr_loss_fct(llm_latent_8_clamped, resampler_output_clamped.detach())        # train LLM
-                            loss_lvr_resampler = (loss_resampler + loss_llm) / 2
-                        if loss_lvr_resampler is not None and (torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler)):
-                            loss_lvr_resampler = llm_latent_8.sum() * 0.0
-                        elif loss_lvr_resampler is not None and os.environ.get("LVR_DEBUG", "0") == "1":
-                            print(f"[LVR.forward] rank={get_rank()} loss_lvr_resampler={loss_lvr_resampler.item():.6f} "
-                                  f"llm_latent_8 shape={llm_latent_8.shape} resampler_output shape={resampler_output.shape}", flush=True)
+                            # Stage 1: bidirectional symmetric loss only (docs/BoxFeatureResampler.md)
+                            resampler_output = self.box_feature_resampler(
+                                bbox_feats, key_padding_mask=key_pad_mask
+                            )
+                            _resampler_output_for_dit = resampler_output  # Save for DiT 50/50 GT condition
+                            seq_positions_start = seq_positions - 1
+                            llm_latent_8 = hidden_states[batch_indices, seq_positions_start].to(torch.float32)
+                            llm_latent_8 = llm_latent_8.view(num_bboxes, num_latent_tokens, -1)
+                            resampler_output = resampler_output.to(torch.float32)
+                            # Avoid NaN: skip loss if inputs contain NaN/Inf; clamp to reduce overflow
+                            if torch.isnan(llm_latent_8).any() or torch.isinf(llm_latent_8).any() or torch.isnan(resampler_output).any() or torch.isinf(resampler_output).any():
+                                loss_lvr_resampler = torch.tensor(0.0, device=llm_latent_8.device, dtype=torch.float32, requires_grad=True)
+                                loss_attn_div = None
+                            else:
+                                llm_latent_8_clamped = torch.clamp(llm_latent_8, min=-1e4, max=1e4)
+                                resampler_output_clamped = torch.clamp(resampler_output, min=-1e4, max=1e4)
+                                # Bidirectional symmetric loss: each side only receives its own gradient (original design)
+                                loss_resampler = lvr_loss_fct(llm_latent_8_clamped.detach(), resampler_output_clamped)  # train resampler
+                                loss_llm = lvr_loss_fct(llm_latent_8_clamped, resampler_output_clamped.detach())        # train LLM
+                                loss_lvr_resampler = (loss_resampler + loss_llm) / 2
+                                loss_ortho = None
+                                loss_attn_div = None
+                            if loss_lvr_resampler is not None and (torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler)):
+                                loss_lvr_resampler = llm_latent_8.sum() * 0.0
+                            elif loss_lvr_resampler is not None and os.environ.get("LVR_DEBUG", "0") == "1":
+                                print(f"[LVR.forward] rank={get_rank()} loss_lvr_resampler={loss_lvr_resampler.item():.6f} "
+                                      f"llm_latent_8 shape={llm_latent_8.shape} resampler_output shape={resampler_output.shape}", flush=True)
                     else:
                         # bbox_feats is empty, return zero loss
                         loss_lvr_resampler = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+                        loss_ortho = None
+                        loss_attn_div = None
                 else:
                     # num_bboxes mismatch, return zero loss
                     loss_lvr_resampler = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+                    loss_ortho = None
+                    loss_attn_div = None
             else:
                 # Empty lvr_tokens or batch_indices, return zero loss
                 # This happens when lvr_tokens was cleared due to truncation in packed dataset
                 loss_lvr_resampler = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+                loss_ortho = None
+                loss_attn_div = None
                 if os.environ.get("LVR_DEBUG", "0") == "1":
                     print(f"[LVR.forward] rank={get_rank()} loss_lvr_resampler=0.0 (empty lvr_tokens or batch_indices)", flush=True)
 
-        # DiT pixel reconstruction: cropped_bbox_images (B, 3, crop_size, crop_size), LLM/GT tokens as condition
-        # FIX: Use num_latent_tokens (actual <lvr> count per bbox) instead of dit_num_latent_tokens
-        # 50/50 GT condition: with probability dit_condition_gt_prob, use Resampler GT output
-        loss_dit_recon = None
-        if getattr(self.config, 'use_dit_reconstruction', False) and hasattr(self, 'dit_recon_head') and labels is not None:
-            num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
-            can_dit = (
-                cropped_bbox_images is not None and cropped_bbox_images.shape[0] > 0
-                and len(batch_indices) >= num_latent_tokens
-                and len(batch_indices) % num_latent_tokens == 0
-            )
-            if can_dit:
-                num_bboxes = len(batch_indices) // num_latent_tokens
-                if num_bboxes == cropped_bbox_images.shape[0]:
-                    seq_positions_start = seq_positions - 1
-                    llm_latent_N = hidden_states[batch_indices, seq_positions_start].to(hidden_states.dtype)
-                    llm_latent_N = llm_latent_N.view(num_bboxes, num_latent_tokens, -1)
-                    
-                    # 50/50 GT condition mechanism
-                    import random
-                    dit_condition_gt_prob = getattr(self.config, 'dit_condition_gt_prob', 0.5)
-                    use_gt_condition = (random.random() < dit_condition_gt_prob) and (_resampler_output_for_dit is not None)
-                    
-                    if use_gt_condition:
-                        dit_condition = _resampler_output_for_dit.detach().to(hidden_states.dtype)
-                    else:
-                        dit_condition = llm_latent_N
-                    
-                    out = self.dit_recon_head(cropped_bbox_images, dit_condition, return_dict=True)
-                    loss_dit_recon = out[0] if isinstance(out, tuple) else out
-                    if loss_dit_recon is not None and (torch.isnan(loss_dit_recon) or torch.isinf(loss_dit_recon)):
-                        loss_dit_recon = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
-            if loss_dit_recon is None:
-                loss_dit_recon = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+            # loss_ortho for logging only when not already baked into loss_lvr_resampler
+            if loss_ortho is None and not use_stage2 and hasattr(self, 'box_feature_resampler'):
+                loss_ortho = self.box_feature_resampler.get_orthogonality_loss()
 
     if not return_dict:
         output = (logits,) + outputs[1:]
@@ -2776,7 +2808,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_head_with_latentEndToken(
         loss_ce=loss_ce,
         loss_lvr=loss_lvr,
         loss_lvr_resampler=loss_lvr_resampler,
-        loss_dit_recon=loss_dit_recon,
+        loss_ortho=loss_ortho,
+        loss_attn_div=loss_attn_div,
+        loss_attn_guidance=loss_attn_guidance,
+        loss_attn_transfer=loss_attn_transfer,
         loss_mode_switch=loss_mode_switch,
         logits=logits,
         past_key_values=outputs.past_key_values,
@@ -2813,7 +2848,6 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
     lvr_tokens: Optional[torch.Tensor] = None,      # This is for TRAINING: Where should the lvr img tokens be
     lvr_mode_switch: Optional[torch.Tensor] = None, # This is for INFERENCE: Which instance in the batch is in lvr mode
     last_position_hidden_state: Optional[torch.FloatTensor] = None, # This is for INFERENCE: last hidden state of the last position
-    cropped_bbox_images: Optional[torch.Tensor] = None,  # (num_bboxes, 3, crop_size, crop_size) for DiT reconstruction
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
     
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -2915,6 +2949,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
                 and num_latent_tokens * num_bboxes == len(batch_indices)
                 and isinstance(lvr_tokens, list)
                 and len(lvr_tokens) == num_bboxes
+                and not getattr(self.config, 'use_stage3_e2e', False)  # Stage 3: use GT fill, no BCM
             )
             if os.environ.get("LVR_DEBUG", "0") == "1":
                 print(f"[LVR.forward] rank={get_rank()} lvr_fill: len(batch_indices)={len(batch_indices)} "
@@ -2999,7 +3034,7 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
@@ -3032,6 +3067,29 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
     )
 
     hidden_states = outputs[0]
+    # Stage 3 E2E: Replace hidden_states at <lvr> positions with DAR output so CE loss flows to DAR
+    use_stage3 = getattr(self.config, 'use_stage3_e2e', False)
+    if use_stage3 and labels is not None and lvr_tokens and len(batch_indices) > 0 and hasattr(self, 'student_resampler') and self.student_resampler is not None:
+        num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
+        num_bboxes = len(batch_indices) // num_latent_tokens
+        if num_bboxes > 0 and num_latent_tokens * num_bboxes == len(batch_indices) and isinstance(lvr_tokens, list) and len(lvr_tokens) == num_bboxes:
+            compute_dtype = hidden_states.dtype
+            lvr_hidden_states = hidden_states[batch_indices, seq_positions].to(compute_dtype)
+            lvr_hidden_states = lvr_hidden_states.view(num_bboxes, num_latent_tokens, -1)
+            batch_indices_per_bbox = batch_indices[0::num_latent_tokens]
+            full_image_features, image_attention_mask = _prepare_batched_image_embeds(
+                image_embeds, total_tokens, batch_indices_per_bbox,
+                target_dtype=compute_dtype,
+            )
+            key_padding_mask = ~image_attention_mask if image_attention_mask is not None else None
+            predicted_latent_tokens = self.student_resampler(
+                lvr_hidden_states=lvr_hidden_states,
+                full_image_features=full_image_features,
+                key_padding_mask=key_padding_mask,
+                return_attention=False,
+            )
+            predicted_latent_tokens = predicted_latent_tokens.view(-1, predicted_latent_tokens.shape[-1])
+            hidden_states[batch_indices, seq_positions] = predicted_latent_tokens.to(hidden_states.dtype)
     last_position_hidden_state = outputs.last_hidden_state[:,-1,:]
     logits = self.lm_head(hidden_states)
 
@@ -3042,7 +3100,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
     loss_ce = None
     loss_lvr = None
     loss_lvr_resampler = None
-    loss_dit_recon = None
+    loss_ortho = None
+    loss_attn_div = None
+    loss_attn_guidance = None
+    loss_attn_transfer = None
     if labels is not None:
         # Upcast to float if we need to compute the loss to avoid potential precision issues
         logits = logits.float()
@@ -3053,44 +3114,47 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
         loss_fct = CrossEntropyLoss()
         shift_logits = shift_logits.view(-1, self.config.vocab_size)
         shift_labels = shift_labels.view(-1)
-        # Don't want CE loss for <lvr> token
-        shift_labels = shift_labels.masked_fill((shift_labels == self.config.lvr_id)|(shift_labels == self.config.lvr_latent_end_id), IGNORE_INDEX)
+        # Stage 3 E2E: only CE on text tokens (mask lvr and lvr_latent_end). Stage 2: same.
+        if getattr(self.config, 'use_stage3_e2e', False) or getattr(self.config, 'use_stage2_distillation', False):
+            shift_labels = shift_labels.masked_fill((shift_labels == self.config.lvr_id)|(shift_labels == self.config.lvr_latent_end_id), IGNORE_INDEX)
+        else:
+            shift_labels = shift_labels.masked_fill(shift_labels == self.config.lvr_latent_end_id, IGNORE_INDEX)
 
         # Enable model parallelism
         shift_labels = shift_labels.to(shift_logits.device)
         loss_ce = loss_fct(shift_logits, shift_labels)
 
-        # lvr loss
-        # Get last hidden states for <lvr> token positions
-        seq_positions_start = seq_positions - 1
-        selected_hidden_states = hidden_states[batch_indices, seq_positions_start].to(torch.float32)  # [L_total, H]
-
-        ''' We need to convert to fp32 to avoid overflow by mse. Truncate to min length so 8-card else_fill mismatch does not cause shape error (one rank crash -> NCCL timeout).'''
-        if selected_lvr_embeds is not None:
-            selected_lvr_embeds = selected_lvr_embeds.to(torch.float32)
-            n_lvr = min(selected_hidden_states.shape[0], selected_lvr_embeds.shape[0])
-            if n_lvr > 0:
-                loss_lvr = lvr_loss_fct(selected_hidden_states[:n_lvr], selected_lvr_embeds[:n_lvr])
+        # Stage 3 E2E: skip all auxiliary losses (loss_lvr, loss_mode_switch, loss_lvr_resampler, etc.)
+        loss_mode_switch = None  # Default; set below when not Stage 3
+        if not use_stage3:
+            # lvr loss
+            seq_positions_start = seq_positions - 1
+            selected_hidden_states = hidden_states[batch_indices, seq_positions_start].to(torch.float32)  # [L_total, H]
+            if selected_lvr_embeds is not None:
+                selected_lvr_embeds = selected_lvr_embeds.to(torch.float32)
+                n_lvr = min(selected_hidden_states.shape[0], selected_lvr_embeds.shape[0])
+                if n_lvr > 0:
+                    loss_lvr = lvr_loss_fct(selected_hidden_states[:n_lvr], selected_lvr_embeds[:n_lvr])
+                else:
+                    loss_lvr = None
             else:
                 loss_lvr = None
-        else:
-            loss_lvr = None
 
         # loss_mode_switch: only when latent_end_token is used (model has lvr_latent_end_emb) and batch has <lvr_latent_end> positions.
-        # Uses hidden state at (seq_positions_latentend - 1), i.e. the 8th <lvr> slot; overlaps with loss_lvr_resampler's llm_latent_8[:, 7, :].
-        loss_mode_switch = None
-        if batch_indices_latentend.numel() > 0 and hasattr(self, 'lvr_latent_end_emb'):
-            seq_positions_start_latentend = seq_positions_latentend - 1
-            selected_hidden_states_latentend = hidden_states[batch_indices_latentend, seq_positions_start_latentend].to(torch.float32)
-            selected_lvr_embeds_latentend = self.lvr_latent_end_emb.unsqueeze(0).expand_as(selected_hidden_states_latentend).to(torch.float32)
-            selected_lvr_embeds_latentend = selected_lvr_embeds_latentend.to(selected_hidden_states_latentend.device)
-            loss_mode_switch = mode_switch_loss_fct(selected_hidden_states_latentend, selected_lvr_embeds_latentend)
+        # Stage 3 E2E: skip (no auxiliary losses)
+        if not use_stage3:
+            if batch_indices_latentend.numel() > 0 and hasattr(self, 'lvr_latent_end_emb'):
+                seq_positions_start_latentend = seq_positions_latentend - 1
+                selected_hidden_states_latentend = hidden_states[batch_indices_latentend, seq_positions_start_latentend].to(torch.float32)
+                selected_lvr_embeds_latentend = self.lvr_latent_end_emb.unsqueeze(0).expand_as(selected_hidden_states_latentend).to(torch.float32)
+                selected_lvr_embeds_latentend = selected_lvr_embeds_latentend.to(selected_hidden_states_latentend.device)
+                loss_mode_switch = mode_switch_loss_fct(selected_hidden_states_latentend, selected_lvr_embeds_latentend)
 
-        # BoxFeatureResampler: fixed N latent MSE (target detached, only LLM optimized). Independent of LVR head. Last slot overlaps with loss_mode_switch.
-        # When use_box_feature_resampler is enabled, always return a valid loss tensor (0.0 if cannot compute)
-        # This ensures consistent gradient sync across all ranks in distributed training
+        # BoxFeatureResampler / Stage 2 distillation: fixed N latent MSE. Stage 2: Teacher frozen, Student aligns to Target.
+        # Stage 3 E2E: skip entire block (no BCM forward, no distillation losses)
         _resampler_output_for_dit = None  # Save resampler output for DiT condition (50/50 GT mechanism)
-        if getattr(self.config, 'use_box_feature_resampler', False) and hasattr(self, 'box_feature_resampler'):
+        use_stage2 = getattr(self.config, 'use_stage2_distillation', False)
+        if not use_stage3 and (getattr(self.config, 'use_box_feature_resampler', False) or (use_stage2 and hasattr(self, 'student_resampler'))) and hasattr(self, 'box_feature_resampler'):
             num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
             
             # Check if we have valid data to compute resampler loss
@@ -3108,87 +3172,129 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
                         device=hidden_states.device, dtype=next(self.box_feature_resampler.parameters()).dtype,
                     )
                     if bbox_feats.shape[0] > 0 and bbox_feats.shape[1] > 0:
-                        # Joint training: bidirectional symmetric loss to prevent "cheating"
-                        # resampler_output has gradients (resampler is trainable)
-                        resampler_output = self.box_feature_resampler(bbox_feats, key_padding_mask=key_pad_mask)
-                        _resampler_output_for_dit = resampler_output  # Save for DiT 50/50 GT condition
-                        llm_latent_8 = hidden_states[batch_indices, seq_positions_start].to(torch.float32)
-                        llm_latent_8 = llm_latent_8.view(num_bboxes, num_latent_tokens, -1)
-                        resampler_output = resampler_output.to(torch.float32)
-                        # Avoid NaN: skip loss if inputs contain NaN/Inf; clamp to reduce overflow
-                        if torch.isnan(llm_latent_8).any() or torch.isinf(llm_latent_8).any() or torch.isnan(resampler_output).any() or torch.isinf(resampler_output).any():
-                            loss_lvr_resampler = torch.tensor(0.0, device=llm_latent_8.device, dtype=torch.float32, requires_grad=True)
+                        if use_stage2 and hasattr(self, 'student_resampler'):
+                            # Stage 2: Teacher (frozen) -> target; Student (LLM hidden states as Q, full image as KV) -> predicted; MSE loss
+                            # Use hidden_states.dtype to match model compute dtype (bf16/fp16) - ZeRO-3 param dtype may be unreliable
+                            compute_dtype = hidden_states.dtype
+                            save_vis = os.environ.get("STAGE2_VIS_ATTENTION", "0") == "1" or getattr(self, "_vis_stage2_attention", False)
+                            need_teacher_attn = (
+                                getattr(self.config, 'loss_attn_transfer_lambda', 0.0) > 0 or save_vis
+                            )
+                            teacher_attn = None
+                            with torch.no_grad():
+                                if need_teacher_attn:
+                                    target_latent_tokens, teacher_attn = self.box_feature_resampler(
+                                        bbox_feats, key_padding_mask=key_pad_mask, return_attention=True
+                                    )
+                                else:
+                                    target_latent_tokens = self.box_feature_resampler(bbox_feats, key_padding_mask=key_pad_mask)
+                            _resampler_output_for_dit = target_latent_tokens  # For DiT 50/50 GT condition
+                            # LLM hidden states at 8 <lvr> positions (autoregressive outputs) - keep in model dtype for student_resampler
+                            lvr_hidden_states = hidden_states[batch_indices, seq_positions].to(compute_dtype)
+                            lvr_hidden_states = lvr_hidden_states.view(num_bboxes, num_latent_tokens, -1)
+                            # Full image features per bbox
+                            batch_indices_per_bbox = batch_indices[0::num_latent_tokens]
+                            full_image_features, image_attention_mask = _prepare_batched_image_embeds(
+                                image_embeds, total_tokens, batch_indices_per_bbox,
+                                target_dtype=compute_dtype,
+                            )
+                            key_padding_mask = ~image_attention_mask if image_attention_mask is not None else None
+                            predicted_latent_tokens, student_attn = self.student_resampler(
+                                lvr_hidden_states=lvr_hidden_states,
+                                full_image_features=full_image_features,
+                                key_padding_mask=key_padding_mask,
+                                return_attention=True,
+                            )
+                            if save_vis and teacher_attn is not None:
+                                self._stage2_vis_buffer = {
+                                    "teacher_attn": teacher_attn.detach().cpu().float(),
+                                    "student_attn": student_attn.detach().cpu().float(),
+                                    "lvr_tokens": [t.cpu() if isinstance(t, torch.Tensor) else t for t in lvr_tokens],
+                                    "batch_indices": batch_indices.cpu(),
+                                    "batch_indices_per_bbox": batch_indices_per_bbox.cpu(),
+                                    "image_grid_thw": image_grid_thw.cpu() if image_grid_thw is not None else None,
+                                    "total_tokens": total_tokens.cpu(),
+                                    "key_pad_mask": key_pad_mask.cpu() if key_pad_mask is not None else None,
+                                    "image_attention_mask": image_attention_mask.cpu() if image_attention_mask is not None else None,
+                                    "num_bboxes": num_bboxes,
+                                    "num_latent_tokens": num_latent_tokens,
+                                }
+                            predicted_latent_tokens = predicted_latent_tokens.to(torch.float32)
+                            target_latent_tokens = target_latent_tokens.to(torch.float32)
+                            if torch.isnan(predicted_latent_tokens).any() or torch.isinf(predicted_latent_tokens).any() or torch.isnan(target_latent_tokens).any() or torch.isinf(target_latent_tokens).any():
+                                loss_lvr_resampler = torch.tensor(0.0, device=predicted_latent_tokens.device, dtype=torch.float32, requires_grad=True)
+                                loss_attn_transfer = None
+                            else:
+                                loss_lvr_resampler = F.mse_loss(predicted_latent_tokens, target_latent_tokens.detach())
+                                # Pixel-level Attention Distillation: KL divergence to align Student with Teacher attention
+                                loss_attn_transfer = None
+                                loss_attn_transfer_lambda = getattr(self.config, 'loss_attn_transfer_lambda', 0.0)
+                                if loss_attn_transfer_lambda > 0 and teacher_attn is not None and student_attn is not None and key_pad_mask is not None:
+                                    seq_len_full = full_image_features.shape[1]
+                                    target_attn = get_aligned_teacher_attn_from_lvr_tokens(
+                                        teacher_attn.float(), lvr_tokens, key_pad_mask,
+                                        seq_len_full, hidden_states.device,
+                                    )
+                                    eps = 1e-9
+                                    student_attn_log = torch.log(student_attn.float() + eps)
+                                    loss_attn_transfer = F.kl_div(student_attn_log, target_attn, reduction='batchmean')
+                                    if not (torch.isnan(loss_attn_transfer) or torch.isinf(loss_attn_transfer)):
+                                        loss_lvr_resampler = loss_lvr_resampler + loss_attn_transfer_lambda * loss_attn_transfer
+                                    else:
+                                        loss_attn_transfer = None
+                            if loss_lvr_resampler is not None and (torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler)):
+                                loss_lvr_resampler = predicted_latent_tokens.sum() * 0.0
+                            elif loss_lvr_resampler is not None and os.environ.get("LVR_DEBUG", "0") == "1":
+                                print(f"[LVR.forward_latentEnd] rank={get_rank()} loss_lvr_resampler (Stage2)={loss_lvr_resampler.item():.6f} "
+                                      f"predicted shape={predicted_latent_tokens.shape} target shape={target_latent_tokens.shape}", flush=True)
                         else:
-                            llm_latent_8_clamped = torch.clamp(llm_latent_8, min=-1e4, max=1e4)
-                            resampler_output_clamped = torch.clamp(resampler_output, min=-1e4, max=1e4)
-                            # Bidirectional symmetric loss: each side only receives its own gradient
-                            loss_resampler = lvr_loss_fct(llm_latent_8_clamped.detach(), resampler_output_clamped)  # train resampler
-                            loss_llm = lvr_loss_fct(llm_latent_8_clamped, resampler_output_clamped.detach())        # train LLM
-                            loss_lvr_resampler = (loss_resampler + loss_llm) / 2
-                        if loss_lvr_resampler is not None and (torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler)):
-                            loss_lvr_resampler = llm_latent_8.sum() * 0.0
-                        elif loss_lvr_resampler is not None and os.environ.get("LVR_DEBUG", "0") == "1":
-                            print(f"[LVR.forward_latentEnd] rank={get_rank()} loss_lvr_resampler={loss_lvr_resampler.item():.6f} "
-                                  f"llm_latent_8 shape={llm_latent_8.shape} resampler_output shape={resampler_output.shape}", flush=True)
+                            # Stage 1: bidirectional symmetric loss only (docs/BoxFeatureResampler.md)
+                            resampler_output = self.box_feature_resampler(
+                                bbox_feats, key_padding_mask=key_pad_mask
+                            )
+                            _resampler_output_for_dit = resampler_output  # Save for DiT 50/50 GT condition
+                            llm_latent_8 = hidden_states[batch_indices, seq_positions_start].to(torch.float32)
+                            llm_latent_8 = llm_latent_8.view(num_bboxes, num_latent_tokens, -1)
+                            resampler_output = resampler_output.to(torch.float32)
+                            # Avoid NaN: skip loss if inputs contain NaN/Inf; clamp to reduce overflow
+                            if torch.isnan(llm_latent_8).any() or torch.isinf(llm_latent_8).any() or torch.isnan(resampler_output).any() or torch.isinf(resampler_output).any():
+                                loss_lvr_resampler = torch.tensor(0.0, device=llm_latent_8.device, dtype=torch.float32, requires_grad=True)
+                                loss_attn_div = None
+                            else:
+                                llm_latent_8_clamped = torch.clamp(llm_latent_8, min=-1e4, max=1e4)
+                                resampler_output_clamped = torch.clamp(resampler_output, min=-1e4, max=1e4)
+                                # Bidirectional symmetric loss: each side only receives its own gradient (original design)
+                                loss_resampler = lvr_loss_fct(llm_latent_8_clamped.detach(), resampler_output_clamped)  # train resampler
+                                loss_llm = lvr_loss_fct(llm_latent_8_clamped, resampler_output_clamped.detach())        # train LLM
+                                loss_lvr_resampler = (loss_resampler + loss_llm) / 2
+                                loss_ortho = None
+                                loss_attn_div = None
+                            if loss_lvr_resampler is not None and (torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler)):
+                                loss_lvr_resampler = llm_latent_8.sum() * 0.0
+                            elif loss_lvr_resampler is not None and os.environ.get("LVR_DEBUG", "0") == "1":
+                                print(f"[LVR.forward_latentEnd] rank={get_rank()} loss_lvr_resampler={loss_lvr_resampler.item():.6f} "
+                                      f"llm_latent_8 shape={llm_latent_8.shape} resampler_output shape={resampler_output.shape}", flush=True)
                     else:
                         # bbox_feats is empty, return zero loss
                         loss_lvr_resampler = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+                        loss_ortho = None
+                        loss_attn_div = None
                 else:
                     # num_bboxes mismatch, return zero loss
                     loss_lvr_resampler = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+                    loss_ortho = None
+                    loss_attn_div = None
             else:
                 # Empty lvr_tokens or batch_indices, return zero loss
-                # This happens when lvr_tokens was cleared due to truncation in packed dataset
                 loss_lvr_resampler = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+                loss_ortho = None
+                loss_attn_div = None
                 if os.environ.get("LVR_DEBUG", "0") == "1":
                     print(f"[LVR.forward_latentEnd] rank={get_rank()} loss_lvr_resampler=0.0 (empty lvr_tokens or batch_indices)", flush=True)
 
-        # DiT pixel reconstruction: cropped_bbox_images (B, 3, crop_size, crop_size), LLM/GT tokens as condition
-        # FIX: Use num_latent_tokens (actual <lvr> count per bbox) instead of dit_num_latent_tokens
-        # to correctly match batch_indices which has num_latent_tokens entries per bbox.
-        # 50/50 GT condition: with probability dit_condition_gt_prob, use Resampler GT output
-        # instead of LLM hidden states. This helps DiT learn denoising with clean condition signal.
-        loss_dit_recon = None
-        if getattr(self.config, 'use_dit_reconstruction', False) and hasattr(self, 'dit_recon_head') and labels is not None:
-            num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
-            can_dit = (
-                cropped_bbox_images is not None and cropped_bbox_images.shape[0] > 0
-                and len(batch_indices) >= num_latent_tokens
-                and len(batch_indices) % num_latent_tokens == 0
-            )
-            if os.environ.get("LVR_DEBUG", "0") == "1":
-                print(f"[DiT.forward_latentEnd] rank={get_rank()} cropped_bbox_images={'None' if cropped_bbox_images is None else cropped_bbox_images.shape}, batch_indices={len(batch_indices) if batch_indices is not None else 'None'}, num_latent_tokens={num_latent_tokens}, can_dit={can_dit}", flush=True)
-            if can_dit:
-                num_bboxes = len(batch_indices) // num_latent_tokens
-                if num_bboxes == cropped_bbox_images.shape[0]:
-                    seq_positions_start = seq_positions - 1
-                    llm_latent_N = hidden_states[batch_indices, seq_positions_start].to(hidden_states.dtype)
-                    llm_latent_N = llm_latent_N.view(num_bboxes, num_latent_tokens, -1)
-                    
-                    # 50/50 GT condition mechanism: randomly choose between LLM tokens and Resampler GT tokens
-                    import random
-                    dit_condition_gt_prob = getattr(self.config, 'dit_condition_gt_prob', 0.5)
-                    use_gt_condition = (random.random() < dit_condition_gt_prob) and (_resampler_output_for_dit is not None)
-                    
-                    if use_gt_condition:
-                        # Use Resampler GT tokens as condition (detached: DiT loss should NOT train the resampler)
-                        dit_condition = _resampler_output_for_dit.detach().to(hidden_states.dtype)
-                    else:
-                        # Use LLM hidden states as condition (default: DiT loss CAN backprop to LLM)
-                        dit_condition = llm_latent_N
-                    
-                    out = self.dit_recon_head(cropped_bbox_images, dit_condition, return_dict=True)
-                    loss_dit_recon = out[0] if isinstance(out, tuple) else out
-                    if loss_dit_recon is not None and (torch.isnan(loss_dit_recon) or torch.isinf(loss_dit_recon)):
-                        loss_dit_recon = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
-                    elif os.environ.get("LVR_DEBUG", "0") == "1":
-                        cond_type = "GT_resampler" if use_gt_condition else "LLM_hidden"
-                        print(f"[DiT.forward_latentEnd] rank={get_rank()} loss_dit_recon={loss_dit_recon.item():.6f} cond={cond_type} shape={dit_condition.shape}", flush=True)
-                else:
-                    if os.environ.get("LVR_DEBUG", "0") == "1":
-                        print(f"[DiT.forward_latentEnd] rank={get_rank()} num_bboxes mismatch: {num_bboxes} vs {cropped_bbox_images.shape[0]}", flush=True)
-            if loss_dit_recon is None:
-                loss_dit_recon = torch.tensor(0.0, device=hidden_states.device, dtype=torch.float32, requires_grad=True)
+            # loss_ortho for logging only when not already baked into loss_lvr_resampler
+            if loss_ortho is None and not use_stage2 and hasattr(self, 'box_feature_resampler'):
+                loss_ortho = self.box_feature_resampler.get_orthogonality_loss()
 
     if not return_dict:
         output = (logits,) + outputs[1:]
@@ -3199,7 +3305,10 @@ def qwen2_5_mixed_modality_forward_lvr_with_latentEndToken(
         loss_ce=loss_ce,
         loss_lvr=loss_lvr,
         loss_lvr_resampler=loss_lvr_resampler,
-        loss_dit_recon=loss_dit_recon,
+        loss_ortho=loss_ortho,
+        loss_attn_div=loss_attn_div,
+        loss_attn_guidance=loss_attn_guidance,
+        loss_attn_transfer=loss_attn_transfer,
         loss_mode_switch=loss_mode_switch,
         logits=logits,
         past_key_values=outputs.past_key_values,
@@ -3329,7 +3438,7 @@ def qwen2_5_mixed_modality_forward_lvr_rl(
             or (past_key_values is None or past_key_values.get_seq_length() == 0)
         )
         if (prefill_compiled_stage or prefill_noncompiled_stage) or self.model.rope_deltas is None:
-            position_ids, rope_deltas = self.get_rope_index(
+            position_ids, rope_deltas = self.model.get_rope_index(
                 input_ids,
                 image_grid_thw,
                 video_grid_thw,
