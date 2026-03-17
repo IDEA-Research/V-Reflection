@@ -27,6 +27,7 @@ ENV/
 .venv
 
 # IDE
+.cursor/
 .vscode/
 .idea/
 *.swp
@@ -63,3 +64,5 @@ core.*
 # Hugging Face upload temp
 .hf_upload_temp/
 
+# Internal scripts (use scripts_release/ for open source)
+scripts/

@@ -185,7 +185,7 @@ loss = loss_ce + 0.1 * MSE + 0.1 * KL
 ### 训练脚本
 
 ```bash
-# scripts/sbatch/sft_7b_stage2_distillation.sh
+# scripts_release/train/sft_7b_stage2_distillation.sh
 CHECKPOINT_PATH="result/box_resampler/SFT_box_resampler_steps2500_b4_LVR0.1_resampler0.1_acc8/checkpoint-2500"
 
 deepspeed src/train/train_lvr.py \
@@ -202,7 +202,7 @@ deepspeed src/train/train_lvr.py \
 
 ```bash
 export CHECKPOINT_PATH="path/to/stage1_checkpoint"
-sbatch scripts/sbatch/sft_7b_stage2_distillation.sh
+bash scripts_release/train/sft_7b_stage2_distillation.sh
 ```
 
 ## 文件结构

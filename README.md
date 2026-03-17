@@ -1,14 +1,12 @@
 # V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators
 
-Authors: Jiazhou Zhou, Yucheng Chen, Hongyang Li, Qing Jiang,,Hu Zhou, Ying-Cong Chen, Lei Zhang
-
 [![Paper](https://img.shields.io/badge/ArXiv-Paper-brown.svg?logo=arxiv)](.)
 [![Model](https://img.shields.io/badge/Model-HuggingFace-blue.svg?logo=huggingface)](https://huggingface.co/garlandchou/V-Reflection)
 [![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
 
 
 This repository contains the official implementation of **V-Reflection: Transforming MLLMs from Passive
-Observers to Active Interrogators**, enabling autoregressive reasoning directly in the visual embedding space for Multimodal Large Language Models. Built on [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct).
+Observers to Active Interrogators**, enabling autoregressive reasoning directly in the visual latent space for Multimodal Large Language Models.
 
 <p align="center">
   <img src="./images/Tesear.png" width="90%">
@@ -23,8 +21,7 @@ pip install qwen-vl-utils
 pip install flash-attn --no-build-isolation
 ```
 
-**Note:** Install flash-attn after the other packages (requires CUDA build). For wandb logging, run `wandb login` or set `WANDB_API_KEY`. This project is forked from [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune).
-
+**Note:** Install flash-attn after the other packages (requires CUDA build). For wandb logging, run `wandb login` or set `WANDB_API_KEY`.
 ## Data Preparation
 
 ### 1. Download Annotations
@@ -132,7 +129,7 @@ First, download our provided [model weights](https://huggingface.co/garlandchou/
 For full benchmark evaluation (BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite):
 
 ```bash
-bash scripts/evaluation/evaluation_7b_stage2.sh
+bash scripts_release/evaluation/evaluation_7b_stage2.sh
 ```
 
 ## Training
@@ -140,14 +137,14 @@ bash scripts/evaluation/evaluation_7b_stage2.sh
 **Stage 1 (Box-Guided Compression):** Compresses variable-length bbox visual features into fixed 8 latent tokens via cross-attention. Set `--data_path` and `--image_folder` in the script.
 
 ```bash
-bash scripts/sbatch/sft_7b_stage1_box_resampler.sh
+bash scripts_release/train/sft_7b_stage1_box_resampler.sh
 ```
 
 **Stage 2 (Dynamic Autoregressive Compression):** Teacher-Student distillation. Requires a Stage 1 checkpoint.
 
 ```bash
 export CHECKPOINT_PATH="path/to/stage1_checkpoint"
-bash scripts/sbatch/sft_7b_stage2_distillation.sh
+bash scripts_release/train/sft_7b_stage2_distillation.sh
 ```
 
 **Note:** We use data packing (InternVL-style). Enable with `--enable_data_packing True`.

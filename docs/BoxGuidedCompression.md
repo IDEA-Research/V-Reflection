@@ -120,7 +120,7 @@ Total Loss = loss_ce + λ_resampler * loss_lvr_resampler
 ### 训练脚本
 
 ```bash
-# scripts/sbatch/sft_7b_box_resampler.sh
+# scripts_release/train/sft_7b_stage1_box_resampler.sh
 LVR_HEAD=False
 USE_BOX_FEATURE_RESAMPLER=True
 NUM_LATENT_TOKENS=8
