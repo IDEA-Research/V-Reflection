@@ -40,6 +40,7 @@ logs/
 result/
 wandb/
 doc/
+docs/
 checkpoints/
 
 # Data (uncomment if you don't want to commit data)
