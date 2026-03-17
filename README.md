@@ -5,15 +5,12 @@
 [![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
 
 
-This repository contains the official implementation of **V-Reflection**.
+This repository contains the official implementation of **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism.
 
 <p align="center">
   <img src="./images/Tesear.png" width="90%">
 </p>
 
-Multimodal Large Language Models (MLLMs) have achieved remarkable success, yet they remain prone to perception-related hallucinations in fine-grained tasks. This vulnerability arises from a fundamental limitation: their reasoning is largely restricted to the language domain, treating visual input as a static, reasoning-agnostic preamble rather than a dynamic participant. Consequently, current models act as **passive observers**, unable to re-examine visual details to ground their evolving reasoning states.
-
-To overcome this, we propose **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism. During reasoning, latent states function as dynamic probes that actively interrogate the visual feature space, grounding each reasoning step for task-critical evidence. 
 
 ## Installation
 
@@ -134,6 +131,8 @@ bash scripts_release/evaluation/evaluation_7b_stage2.sh
 
 ## Training
 
+**Prerequisites:** Download the base model [Qwen2.5-VL-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) from HuggingFace before training. The training scripts load it by default via `Qwen/Qwen2.5-VL-7B-Instruct` (or set `HF_HOME` / `TRANSFORMERS_CACHE` for custom cache paths).
+
 **Stage 1 (Box-Guided Compression):** Compresses variable-length bbox visual features into fixed 8 latent tokens via cross-attention. Set `--data_path` and `--image_folder` in the script.
 
 ```bash
@@ -161,7 +160,6 @@ We provide checkpoints for V-Reflection. Results on visual perception and high-r
 | HRBench-4K | **72.6**            | 68.0          |
 | HRBench-8K | **66.3**            | 63.8          |
 | MME-Real-Lite | **53.9**         | 45.8          |
-
 
 | Model | Download |
 |:-----:|:--------:|
