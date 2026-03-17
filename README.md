@@ -2,7 +2,7 @@
 
 [![Paper](https://img.shields.io/badge/ArXiv-Paper-brown.svg?logo=arxiv)](.)
 [![Model](https://img.shields.io/badge/Model-HuggingFace-blue.svg?logo=huggingface)](https://huggingface.co/garlandchou/V-Reflection)
-[![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
+[![Code](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](https://github.com/IDEA-Research/V-Reflection)
 
 
 This repository contains the official implementation of **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism.
@@ -152,7 +152,7 @@ bash scripts_release/train/sft_7b_stage2_distillation.sh
 
 We provide checkpoints for V-Reflection. Results on visual perception and high-resolution benchmarks:
 
-| Benchmark | V-Reflection (ours) | Qwen2.5-VL-7B |
+| Benchmark | [V-Reflection (ours) Download](https://huggingface.co/garlandchou/V-Reflection) | Qwen2.5-VL-7B |
 |:---------:|:-------------------:|:-------------:|
 | MMVP      | **72.3**             | 66.7          |
 | BLINK     | **56.4**             | 54.5          |
@@ -160,10 +160,6 @@ We provide checkpoints for V-Reflection. Results on visual perception and high-r
 | HRBench-4K | **72.6**            | 68.0          |
 | HRBench-8K | **66.3**            | 63.8          |
 | MME-Real-Lite | **53.9**         | 45.8          |
-
-| Model | Download |
-|:-----:|:--------:|
-| V-Reflection | [HuggingFace](https://huggingface.co/garlandchou/V-Reflection) |
 
 ## Method
 
@@ -208,7 +204,7 @@ If you find this work helpful for your research, please cite:
 
 We would like to thank the authors of the following projects for their excellent work:
 
-- [Qwen2.5-VL](https://github.com/QwenLM/Qwen3-VL) - MLLM series from Qwen family
+- [Qwen2.5-VL](https://github.com/QwenLM/Qwen2.5-VL) - MLLM series from Qwen family
 - [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune) - Open-source project for finetuning Qwen-2-VL/Qwen-2.5VL models
 - [LVR](https://github.com/VincentLeebang/lvr) - Latent Visual Reasoning model by Vincent Lee
 - [Visual-CoT](https://github.com/deepcs233/Visual-CoT) - Visual CoT dataset
