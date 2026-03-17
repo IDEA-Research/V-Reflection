@@ -1,8 +1,8 @@
-# Latent Visual Reasoning: Autoregressive Reasoning in the Visual Embedding Space
+# V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators
 
 Authors: Jiazhou Zhou, Yucheng Chen, Hongyang Li, Qing Jiang,,Hu Zhou, Ying-Cong Chen, Lei Zhang
 
-[![Paper](https://img.shields.io/badge/ArXiv-Paper-brown.svg?logo=arxiv)](https://arxiv.org/abs/2509.24251)
+[![Paper](https://img.shields.io/badge/ArXiv-Paper-brown.svg?logo=arxiv)](.)
 [![Model](https://img.shields.io/badge/Model-HuggingFace-blue.svg?logo=huggingface)](https://huggingface.co/garlandchou/V-Reflection)
 [![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
 
