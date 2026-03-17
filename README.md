@@ -11,7 +11,7 @@ This repository contains the official implementation of **V-Reflection: Transfor
 Observers to Active Interrogators**, enabling autoregressive reasoning directly in the visual embedding space for Multimodal Large Language Models. Built on [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct).
 
 <p align="center">
-  <img src="./imgaes/Tesear.png" width="90%">
+  <img src="./images/Tesear.png" width="90%">
 </p>
 
 ## Installation
@@ -179,7 +179,7 @@ We provide checkpoints for V-Reflection. Results on visual perception and high-r
 ## Method
 
 <p align="center">
-  <img src="./imgaes/Framework.png" width="90%">
+  <img src="./images/Framework.png" width="90%">
 </p>
 
 - **Stage 1 (BCM):** Box-Guided Compression with *Stochastic Decoupled Alignment* — bidirectional symmetric loss to jointly train resampler and LLM.
@@ -193,13 +193,13 @@ See `docs/BoxGuidedCompression.md` and `docs/Stage2_Distillation.md` for details
 **Training Attention (Stage 2):** Teacher vs Student attention maps during distillation.
 
 <p align="center">
-  <img src="./imgaes/Train_Attn.png" width="90%">
+  <img src="./images/Train_Attn.png" width="90%">
 </p>
 
 **Inference Attention:** Coconut-style latent reasoning visualization during inference.
 
 <p align="center">
-  <img src="./imgaes/Inference_Attn.png" width="90%">
+  <img src="./images/Inference_Attn.png" width="90%">
 </p>
 
 ## Citation
