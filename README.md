@@ -5,8 +5,11 @@
 [![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
 
 
-This repository contains the official implementation of **V-Reflection: Transforming MLLMs from Passive
-Observers to Active Interrogators**, enabling autoregressive reasoning directly in the visual latent space for Multimodal Large Language Models.
+Multimodal Large Language Models (MLLMs) have achieved remarkable success, yet they remain prone to perception-related hallucinations in fine-grained tasks. This vulnerability arises from a fundamental limitation: their reasoning is largely restricted to the language domain, treating visual input as a static, reasoning-agnostic preamble rather than a dynamic participant. Consequently, current models act as **passive observers**, unable to re-examine visual details to ground their evolving reasoning states.
+
+To overcome this, we propose **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism. During reasoning, latent states function as dynamic probes that actively interrogate the visual feature space, grounding each reasoning step for task-critical evidence. Our approach employs a two-stage distillation strategy: first, the **Box-Guided Compression (BCM)** module establishes stable pixel-to-latent targets through explicit spatial grounding; next, a **Dynamic Autoregressive Compression (DAC)** module maps the model's hidden states into dynamic probes that interrogate the global visual feature map. By distilling the spatial expertise of the BCM teacher into the DAC student, V-Reflection internalizes the ability to localize task-critical evidence. During inference, both modules remain entirely inactive, maintaining a purely end-to-end autoregressive decoding in the latent space with optimal efficiency. Extensive experiments demonstrate the effectiveness of V-Reflection across six perception-intensive benchmarks, significantly narrowing the fine-grained perception gap. Visualizations confirm that latent reasoning autonomously localizes task-critical visual evidence.
+
+This repository contains the official implementation of **V-Reflection**.
 
 <p align="center">
   <img src="./images/Tesear.png" width="90%">
@@ -97,9 +100,6 @@ Set `--data_path` to a meta JSON that lists your formatted datasets. Example `da
 ]
 ```
 
-- **default**: `meta_data_lvr_sft_stage1.json` (SROIE + DUDE subset)
-- **viscot_full**: `meta_data_lvr_sft_stage1_viscot_full.json` (363K with COCO/OpenImages). Set `DATASET_CONFIG=viscot_full` when training.
-
 ### 5. Data Format
 
 Each entry follows LLaVA specification with `image`, `conversations`, and `bboxes`. The `<image>` and `<lvr>` are placeholders for data collation.
@@ -153,21 +153,15 @@ bash scripts_release/train/sft_7b_stage2_distillation.sh
 
 We provide checkpoints for V-Reflection. Results on visual perception and high-resolution benchmarks:
 
-**Table 1: Visual perception and cognitive benchmarks (7B)**
-
 | Benchmark | V-Reflection (ours) | Qwen2.5-VL-7B |
 |:---------:|:-------------------:|:-------------:|
 | MMVP      | **72.3**             | 66.7          |
 | BLINK     | **56.4**             | 54.5          |
 | V*        | **81.7**             | 78.5          |
-
-**Table 2: Real-world high-resolution perception and reasoning benchmarks (8B)**
-
-| Benchmark | V-Reflection (ours) | Qwen2.5-VL-7B |
-|:---------:|:-------------------:|:-------------:|
 | HRBench-4K | **72.6**            | 68.0          |
 | HRBench-8K | **66.3**            | 63.8          |
 | MME-Real-Lite | **53.9**         | 45.8          |
+
 
 | Model | Download |
 |:-----:|:--------:|
@@ -179,13 +173,13 @@ We provide checkpoints for V-Reflection. Results on visual perception and high-r
   <img src="./images/Framework.png" width="90%">
 </p>
 
-- **Stage 1 (BCM):** Box-Guided Compression with *Stochastic Decoupled Alignment* — bidirectional symmetric loss to jointly train resampler and LLM.
-- **Stage 2 (DAC):** Dynamic Autoregressive Compression — Student uses LLM hidden states as Queries, full-image features as K/V, MSE distillation to frozen Teacher.
-- **Inference:** Coconut-style decoding — `last_position_hidden_state` as next-step input embedding for 8-step latent reasoning.
-
-See `docs/BoxGuidedCompression.md` and `docs/Stage2_Distillation.md` for details.
+- **Stage 1 (BCM):** Box-Guided Compression establishes stable pixel-to-latent targets through explicit spatial grounding, with *Stochastic Decoupled Alignment* — bidirectional symmetric loss to jointly train resampler and LLM.
+- **Stage 2 (DAC):** Dynamic Autoregressive Compression maps the model's hidden states into dynamic probes that interrogate the global visual feature map. Student uses LLM hidden states as Queries, full-image features as K/V, MSE distillation from frozen BCM Teacher.
+- **Inference:** Both BCM and DAC remain entirely inactive. Purely end-to-end autoregressive decoding in the latent space — `last_position_hidden_state` as next-step input embedding for 8-step latent reasoning with optimal efficiency.
 
 ## Qualitative Results
+
+Visualizations confirm that latent reasoning autonomously localizes task-critical visual evidence.
 
 **Training Attention (Stage 2):** Teacher vs Student attention maps during distillation.
 
@@ -193,7 +187,7 @@ See `docs/BoxGuidedCompression.md` and `docs/Stage2_Distillation.md` for details
   <img src="./images/Train_Attn.png" width="90%">
 </p>
 
-**Inference Attention:** Coconut-style latent reasoning visualization during inference.
+**Inference Attention:** Latent reasoning visualization — dynamic probes interrogate the visual feature space during inference.
 
 <p align="center">
   <img src="./images/Inference_Attn.png" width="90%">
