@@ -447,14 +447,13 @@ class IterableSupervisedDatasetLVR(Dataset):
                 continue
             
             # === ALIGN LVR TOKENS WITH <lvr> PLACEHOLDERS ===
-            # For viscot_x 数据集，常见情况是 bboxes 有多个框，但 prompt 里只放了 1 个 LVR_PLACEHOLDER。
-            # replace_lvr_tokens 在这种情况下只会用前 N 个 lvr_token_idxs_list 元素生成 <lvr> token，
-            # 但我们这里的 lvr_tokens 仍然包含所有 bbox，对应关系就会错位，造成数量不匹配。
+            # For viscot_x datasets: bboxes may have multiple boxes but prompt has only 1 LVR_PLACEHOLDER.
+            # replace_lvr_tokens uses only the first N lvr_token_idxs_list elements to generate <lvr> tokens,
+            # while our lvr_tokens here still include all bboxes, causing misalignment and count mismatch.
             #
-            # 这里按原始 conversations 里出现的 LVR_PLACEHOLDER 次数来裁剪 lvr_token_idxs_list，
-            # 保证：
-            #   len(lvr_token_idxs_list_used) == num_placeholders
-            # 从而使 input_ids 里的 <lvr> 个数和 lvr_tokens 的总长度一致。
+            # Truncate lvr_token_idxs_list by the number of LVR_PLACEHOLDER occurrences in conversations,
+            # ensuring len(lvr_token_idxs_list_used) == num_placeholders
+            # so that the number of <lvr> in input_ids matches the total length of lvr_tokens.
             if self.fixed_num_of_lvr_tokens is None:
                 num_placeholders = 0
                 raw_convs = self.raw_data[i].get('conversations', [])
@@ -463,7 +462,7 @@ class IterableSupervisedDatasetLVR(Dataset):
                     if isinstance(value, str):
                         num_placeholders += value.count(LVR_PLACEHOLDER)
                 if num_placeholders == 0:
-                    # 没有 LVR_PLACEHOLDER，则不应该有任何 lvr_tokens
+                    # No LVR_PLACEHOLDER; there should be no lvr_tokens
                     logger.warning(
                         f"[{self.ds_name}] Sample {i} has {len(lvr_token_idxs_list)} bboxes "
                         f"but no LVR_PLACEHOLDER in conversations. "
@@ -478,7 +477,7 @@ class IterableSupervisedDatasetLVR(Dataset):
                     )
                     lvr_token_idxs_list = lvr_token_idxs_list[:num_placeholders]
                 elif len(lvr_token_idxs_list) < num_placeholders:
-                    # 占位符比 bbox 多，这样很难保证一一对应，直接跳过样本以避免崩溃
+                    # More placeholders than bboxes; cannot guarantee 1:1 mapping; skip sample to avoid crash
                     logger.warning(
                         f"[{self.ds_name}] Sample {i} has only {len(lvr_token_idxs_list)} bbox groups "
                         f"but {num_placeholders} LVR_PLACEHOLDER occurrences. "
@@ -498,9 +497,6 @@ class IterableSupervisedDatasetLVR(Dataset):
                         f"data_idx={i}, worker_id={worker_id_str}. "
                         f"This should NEVER happen after our fixes!"
                     )
-                    print(f"[BBOX_RETURNED_EMPTY] bbox_idx={bbox_idx}, bbox={sources.get('bboxes', [])[bbox_idx] if bbox_idx < len(sources.get('bboxes', [])) else 'unknown'}, "
-                          f"image_grid_thw={image_grid_thw[0].tolist()}, data_idx={i}, worker_id={worker_id_str}, "
-                          f"lvr_token_idxs_list={lvr_token_idxs_list}", flush=True)
             
             # Validate lvr_token_idxs_list - check for empty token lists
             # TEMPORARILY DISABLED: Skip logic disabled for testing
@@ -601,9 +597,6 @@ class IterableSupervisedDatasetLVR(Dataset):
                         f"image_grid_thw={image_grid_thw[0].tolist()}, "
                         f"data_idx={i}, worker_id={self.worker_id}. This will cause NaN loss!"
                     )
-                    print(f"[EMPTY_GROUP_DETECTED] group_idx={group_idx}, data_idx={i}, worker_id={worker_id_str}, "
-                          f"bbox={bboxes[group_idx] if group_idx < len(bboxes) else 'unknown'}, "
-                          f"image_grid_thw={image_grid_thw[0].tolist()}", flush=True)
                 
                 token_tensor = torch.tensor(group, dtype=torch.int)
                 # print(f"[CREATE_LVR_TOKEN] group_idx={group_idx}, group_length={len(group)}, "
@@ -629,9 +622,6 @@ class IterableSupervisedDatasetLVR(Dataset):
                     f"lvr_tokens numel: {[t.numel() for t in lvr_tokens]}. "
                     f"Would skip but continuing anyway - may cause NaN loss."
                 )
-                print(f"[SKIP_SAMPLE_DISABLED] data_idx={i}, worker_id={self.worker_id}, bboxes={bboxes}, "
-                      f"image_grid_thw={image_grid_thw[0].tolist()}, "
-                      f"lvr_tokens_empty=True", flush=True)
                 # continue  # TEMPORARILY DISABLED - Skip this sample immediately
                 # Replace empty tensors with a dummy token [0] to avoid downstream errors
                 for idx, token_tensor in enumerate(lvr_tokens):
@@ -691,7 +681,7 @@ class IterableSupervisedDatasetLVR(Dataset):
             #   - In variable-length LVR mode (fixed_num_of_lvr_tokens is None), each <lvr> corresponds to ONE visual token index,
             #     so we can safely require:
             #         num_lvr_in_input_ids == total_lvr_tokens.
-            #   - In fixed-length latent mode (self.fixed_num_of_lvr_tokens > 0, e.g. BoxFeatureResampler),
+            #   - In fixed-length latent mode (self.fixed_num_of_lvr_tokens > 0, e.g. Box-Guided Compression),
             #     each bbox uses `fixed_num_of_lvr_tokens` <lvr> slots, while lvr_tokens stores a *set* of visual
             #     token indices per bbox. In this case, the only meaningful check is:
             #         num_lvr_in_input_ids == fixed_num_of_lvr_tokens * num_bboxes
@@ -701,7 +691,7 @@ class IterableSupervisedDatasetLVR(Dataset):
             num_lvr_in_input_ids = (input_ids == lvr_token_id).sum().item()
 
             if self.fixed_num_of_lvr_tokens:
-                # Fixed-N latent mode (BoxFeatureResampler): check per-bbox slot count.
+                # Fixed-N latent mode (Box-Guided Compression): check per-bbox slot count.
                 if num_lvr_in_input_ids % self.fixed_num_of_lvr_tokens != 0:
                     logger.error(
                         f"[{self.ds_name}] ❌ CRITICAL: lvr_tokens slot mismatch in fixed-N mode! "
@@ -926,9 +916,6 @@ class PackedDataset(IterableDataset):
                                 f"lvr_tokens numel: {[t.numel() if isinstance(t, torch.Tensor) else len(t) for t in lvr_tokens]}. "
                                 f"Would skip but continuing anyway - may cause NaN loss."
                             )
-                            print(f"[SKIP_SAMPLE_PACKED_DISABLED] worker_id={self.worker_id}, data_rank={self.data_rank}, "
-                                  f"ds_name={self.datasets[current_dataset_idx].ds_name}, "
-                                  f"lvr_tokens_empty=True", flush=True)
                             # continue  # TEMPORARILY DISABLED - Skip this sample and get next one
                             # Replace empty tensors with dummy token [0] to avoid downstream errors
                             for idx, token_group in enumerate(lvr_tokens):
@@ -1048,8 +1035,6 @@ class PackedDataset(IterableDataset):
                                 f"worker_id={self.worker_id}, data_rank={self.data_rank}. "
                                 f"Using fallback token 0."
                             )
-                            print(f"[UPDATE_BUFFER_EMPTY_LVR] idx={idx}, worker_id={self.worker_id}, "
-                                  f"data_rank={self.data_rank}, using_fallback_token_0=True", flush=True)
                             # Replace empty tensor with token 0
                             new_sample[k][idx] = torch.tensor([0], dtype=torch.int)
                 buffer[k] = buffer[k] + new_sample[k]

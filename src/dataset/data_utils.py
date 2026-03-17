@@ -53,7 +53,7 @@ def replace_lvr_tokens(input_string,lvr_token_idxs_list,latent_end_token,fixed_n
                 replacement = LVR_START_TOKEN + LVR_END_TOKEN  # No <|lvr|> tokens in between!
                 output_segments.append(replacement+seg)
         elif fixed_num_of_lvr_tokens is not None:
-            # Fixed N LVR tokens per segment (e.g. 8 for BoxFeatureResampler); optional latent_end
+            # Fixed N LVR tokens per segment (e.g. 8 for Box-Guided Compression); optional latent_end
             for seg in input_segments:
                 if latent_end_token:
                     replacement = LVR_START_TOKEN + LVR_TOKEN*fixed_num_of_lvr_tokens + LVR_LATENT_END_TOKEN + LVR_END_TOKEN
@@ -200,7 +200,7 @@ def map_image_path(image_path, image_folder, dataset_name=None):
     
     Args:
         image_path: Image path from JSON (e.g., "viscot/cub/001.Black_footed_Albatross/image.jpg")
-        image_folder: Base image folder (e.g., "/comp_robot/zhoujiazhou/Datasets/Visual_cot/images")
+        image_folder: Base image folder (e.g., "data/images" or absolute path to your image directory)
         dataset_name: Optional dataset name from JSON item, used as fallback if not in path
     
     Returns:

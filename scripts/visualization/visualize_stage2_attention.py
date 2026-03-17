@@ -423,7 +423,7 @@ def build_input_for_forward(sample, processor, model, num_latent_tokens=8):
 
 def attention_to_2d_bbox(attn_weights, lvr_tokens_flat, key_pad_mask, token_grid_h, token_grid_w):
     """
-    Map Teacher (BoxFeatureResampler) attention to 2D grid.
+    Map Teacher (Box-Guided Compression) attention to 2D grid.
     attn_weights: (1, N) - one query's attention over N bbox tokens (same order as lvr_tokens_flat).
     lvr_tokens_flat: bbox token indices in same order as bbox_feats (row-major).
     """
@@ -441,7 +441,7 @@ def attention_to_2d_bbox(attn_weights, lvr_tokens_flat, key_pad_mask, token_grid
 
 def attention_to_2d_full(attn_weights, image_attention_mask, token_grid_h, token_grid_w):
     """
-    Map Student (DynamicAutoregressiveResampler) attention to 2D grid.
+    Map Student (Dynamic Autoregressive Compression) attention to 2D grid.
     attn_weights: (1, 1, Seq_Len) - one latent step's attention over full image tokens (row-major).
     """
     attn = attn_weights.numpy().flatten()  # (Seq_Len,)
@@ -604,7 +604,6 @@ def main():
     config.use_stage2_distillation = True
     replace_qwen2_5_with_mixed_modality_forward_lvr(
         inference_mode=False,
-        lvr_head=False,
         use_box_feature_resampler=True,
         use_stage2_distillation=True,
     )
@@ -626,7 +625,7 @@ def main():
         meta_path = os.path.join(PROJECT_ROOT, args.meta_path) if not os.path.isabs(args.meta_path) else args.meta_path
         with open(meta_path) as f:
             meta = json.load(f)
-        image_folder = meta[0].get("image_folder", "/comp_robot/zhoujiazhou/Datasets/Visual_cot/images")
+        image_folder = meta[0].get("image_folder", os.path.join(PROJECT_ROOT, "data", "images"))
         print(f"Uniformly sampling {args.num_training_samples} from training set: {meta_path}")
         samples = load_training_samples_uniform(meta_path, args.num_training_samples, processor, image_folder)
         print(f"Loaded {len(samples)} samples total")
@@ -711,7 +710,7 @@ def main():
         meta_path = os.path.join(PROJECT_ROOT, args.meta_path) if not os.path.isabs(args.meta_path) else args.meta_path
         with open(meta_path) as f:
             meta = json.load(f)
-        image_folder = meta[0].get("image_folder", "/comp_robot/zhoujiazhou/Datasets/Visual_cot/images")
+        image_folder = meta[0].get("image_folder", os.path.join(PROJECT_ROOT, "data", "images"))
 
         for sample_idx in args.sample_indices:
             try:

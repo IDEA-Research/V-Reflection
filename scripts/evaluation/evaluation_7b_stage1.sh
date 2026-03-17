@@ -6,21 +6,33 @@
 #SBATCH --gres=gpu:hgx:8 # A800 - Use 8 GPUs for parallel evaluation
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/evaluation_7b_box_resampler_%j.txt
+#SBATCH --output=logs/evaluation_7b_box_resampler_%j.txt
 
 # ============================================================================
 # Evaluation Script for Box Resampler Model
 # Tests all checkpoints with step4 and step8 to compare LVR thinking steps
 # ============================================================================
 
+# Resolve PROJECT_ROOT early (needed for BASE_CHECKPOINT_DIR resolution)
+# Under sbatch: BASH_SOURCE points to slurmd temp copy; use SLURM_SUBMIT_DIR (where user ran sbatch)
+# Direct run: derive from script location
+if [ -n "${SLURM_SUBMIT_DIR}" ]; then
+    PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+
 # Base checkpoint directory for box_resampler model (parent dir containing checkpoint-*)
-BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/box_resampler/SFT_box_resampler_steps2500_b4_resampler0.5_acc8_latent8_lr5e-6}"
+# Set BASE_CHECKPOINT_DIR or run from project root; default uses relative path
+BASE_CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR:-result/box_resampler/SFT_box_resampler_steps2500_b4_resampler0.5_acc8_latent8}"
+[[ "$BASE_CHECKPOINT_DIR" != /* ]] && BASE_CHECKPOINT_DIR="${PROJECT_ROOT}/${BASE_CHECKPOINT_DIR}"
 
 # Only test specific checkpoint(s). Set to "2500" for ck-2500 only; leave empty to auto-detect all
 CHECKPOINT_STEPS="${CHECKPOINT_STEPS:-}"
 
-# Only test specific benchmarks. Comma-separated, e.g. "MathVision,MathVista,VisuLogic,EMMA". Empty = all
-EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-BLINK, MMVP, VSTAR, POPE}"
+# Only test: BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite
+EVAL_BENCHMARKS="${EVAL_BENCHMARKS:-BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite}"
 export EVAL_BENCHMARKS
 
 # Auto-detect all checkpoint directories (only when CHECKPOINT_STEPS is empty)
@@ -56,7 +68,7 @@ if command -v conda &> /dev/null; then
     fi
 fi
 
-PROJECT_ROOT="/comp_robot/zhoujiazhou/projects/Active-Coconut"
+export PROJECT_ROOT
 cd "$PROJECT_ROOT" || exit 1
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 
@@ -203,6 +215,38 @@ except Exception as e:
 EOF
 }
 
+# MME-RealWorld-Lite: read from summary, show Perception/Reasoning + Overall
+calculate_mme_realworld_lite_accuracy() {
+    local json_file=$1
+    if [ ! -f "$json_file" ]; then
+        echo "  [Result] MME-RealWorld-Lite: File not found"
+        return 1
+    fi
+    python3 << EOF
+import json
+path = '$json_file'
+try:
+    with open(path) as f:
+        data = json.load(f)
+    if not data or not isinstance(data[0], dict) or 'overall_accuracy' not in data[0]:
+        print("  [Result] MME-RealWorld-Lite: No summary found")
+    else:
+        s = data[0]
+        total = s.get('overall_total', 0)
+        correct = s.get('overall_correct', 0)
+        acc = s.get('overall_accuracy', 0)
+        print(f"  [Result] MME-RealWorld-Lite: {correct}/{total} = {acc:.2f}% (Overall)")
+        pr = s.get('accuracy_by_perception_reasoning', {})
+        if pr:
+            for cat in ['Perception', 'Reasoning']:
+                if cat in pr:
+                    v = pr[cat]
+                    print(f"    {cat}: {v.get('correct', 0)}/{v.get('total', 0)} = {v.get('accuracy', 0):.2f}%")
+except Exception as e:
+    print(f"  [Result] MME-RealWorld-Lite: Error - {e}")
+EOF
+}
+
 # ============================================================================
 # Step 2: Run Evaluation
 # ============================================================================
@@ -256,8 +300,8 @@ run_evaluation() {
     echo "Results for checkpoint-${checkpoint_step}:"
     echo "============================================================================"
     
-    # Get run_name for result paths
-    local result_prefix="/comp_robot/zhoujiazhou/projects/Active-Coconut/result"
+    # Get run_name for result paths (must match evaluation.py: result_prefix = PROJECT_ROOT/result)
+    local result_prefix="${PROJECT_ROOT}/result"
     local run_name=""
     if [[ "$checkpoint_path" == "$result_prefix"* ]]; then
         local relative_path="${checkpoint_path#$result_prefix/}"
@@ -307,11 +351,10 @@ print(f'{100*correct/total:.2f}' if total > 0 else 'N/A')
         local mmvp_json="${PROJECT_ROOT}/evaluation/results/MMVP/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json"
         calculate_accuracy "$mmvp_json" "MMVP"
 
-        # MathVision, MathVista, VisuLogic, EMMA results
-        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/MathVision/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "MathVision" 0
-        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/MathVista/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "MathVista" 0
-        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/VisuLogic/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "VisuLogic" 0
-        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/EMMA/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "EMMA" 0
+        # HRBench4K, HRBench8K, MME-RealWorld-Lite
+        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/HRBench4K/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "HRBench4K" 0
+        calculate_accuracy "${PROJECT_ROOT}/evaluation/results/HRBench8K/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json" "HRBench8K" 0
+        calculate_mme_realworld_lite_accuracy "${PROJECT_ROOT}/evaluation/results/MME-RealWorld-Lite/decoding_by_steps/${run_name}/ck-${checkpoint_step}-step${eval_step}.json"
     done
     
     echo ""
@@ -344,7 +387,7 @@ echo "==========================================================================
 echo "Step 2.5: Merging orphaned process result files"
 echo "============================================================================"
 
-result_prefix="/comp_robot/zhoujiazhou/projects/Active-Coconut/result"
+result_prefix="${PROJECT_ROOT}/result"
 if [[ "$BASE_CHECKPOINT_DIR" == "$result_prefix"* ]]; then
     run_name="${BASE_CHECKPOINT_DIR#$result_prefix/}"
 else
@@ -353,7 +396,7 @@ fi
 run_name="${run_name%/}"
 
 IFS=',' read -ra STEP_ARRAY <<< "$EVAL_STEP_LIST"
-DATASETS=("blink:BLINK" "vstar_bench:VSTAR" "MMVP:MMVP" "MathVision:MathVision" "MathVista:MathVista" "VisuLogic:VisuLogic" "EMMA:EMMA")
+DATASETS=("blink:BLINK" "vstar_bench:VSTAR" "MMVP:MMVP" "HRBench4K:HRBench4K" "HRBench8K:HRBench8K" "MME-RealWorld-Lite:MME-RealWorld-Lite")
 merge_count=0
 
 for ck in "${CHECKPOINT_STEPS[@]}"; do
@@ -410,53 +453,52 @@ def extract_answer(pred):
         given_answer = given_answer[0]
     return given_answer
 
-def calculate_stats(json_file):
-    """Calculate overall and per-category accuracy from a result file."""
+def calculate_stats(json_file, use_mme_pr=False):
+    """Calculate overall and per-category accuracy from a result file.
+    use_mme_pr: True for MME-RealWorld-Lite - read from summary."""
     if not os.path.exists(json_file):
         return None, {}
-    
     try:
         with open(json_file, 'r') as f:
             data = json.load(f)
-        
+        if use_mme_pr and data and isinstance(data[0], dict) and 'overall_accuracy' in data[0]:
+            s = data[0]
+            overall = s.get('overall_accuracy')
+            pr = s.get('accuracy_by_perception_reasoning', {})
+            cat_results = {cat: pr[cat].get('accuracy') for cat in ['Perception', 'Reasoning'] if cat in pr}
+            return overall, cat_results
         category_stats = defaultdict(lambda: {'total': 0, 'correct': 0})
         total = correct = 0
-        
         for item in data:
             if 'prediction' not in item or 'label' not in item:
                 continue
-            if 'accuracy_by_category' in item:
+            if 'accuracy_by_category' in item or 'overall_accuracy' in item:
                 continue
-            
             pred = item['prediction'][0] if isinstance(item['prediction'], list) else item['prediction']
             label = item['label']
             category = item.get('category', 'Unknown')
-            
             given_answer = extract_answer(pred)
-            
             category_stats[category]['total'] += 1
             if given_answer == label:
                 correct += 1
                 category_stats[category]['correct'] += 1
             total += 1
-        
         overall = 100 * correct / total if total > 0 else None
         cat_results = {}
         for cat, stats in category_stats.items():
             cat_results[cat] = 100 * stats['correct'] / stats['total'] if stats['total'] > 0 else None
-        
         return overall, cat_results
     except:
         return None, {}
 
 # Configuration
-project_root = os.environ.get('PROJECT_ROOT', '/comp_robot/zhoujiazhou/projects/Active-Coconut')
+project_root = os.environ.get('PROJECT_ROOT', os.getcwd())
 base_dir = os.environ.get('BASE_CHECKPOINT_DIR', '')
 eval_steps = os.environ.get('EVAL_STEP_LIST', '4,8').split(',')
 eval_steps = [s.strip() for s in eval_steps]
 
-# Get run_name from base_dir
-result_prefix = "/comp_robot/zhoujiazhou/projects/Active-Coconut/result"
+# Get run_name from base_dir (must match evaluation.py)
+result_prefix = os.path.join(project_root, "result")
 if base_dir.startswith(result_prefix):
     run_name = base_dir[len(result_prefix)+1:]
 else:
@@ -474,15 +516,14 @@ if not checkpoints:
     print("No checkpoints found.")
     exit(0)
 
-# Datasets to evaluate
+# Datasets to evaluate: BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite
 datasets = {
     'BLINK': f'{project_root}/evaluation/results/blink/decoding_by_steps/{run_name}',
     'VSTAR': f'{project_root}/evaluation/results/vstar_bench/decoding_by_steps/{run_name}',
     'MMVP': f'{project_root}/evaluation/results/MMVP/decoding_by_steps/{run_name}',
-    'MathVision': f'{project_root}/evaluation/results/MathVision/decoding_by_steps/{run_name}',
-    'MathVista': f'{project_root}/evaluation/results/MathVista/decoding_by_steps/{run_name}',
-    'VisuLogic': f'{project_root}/evaluation/results/VisuLogic/decoding_by_steps/{run_name}',
-    'EMMA': f'{project_root}/evaluation/results/EMMA/decoding_by_steps/{run_name}',
+    'HRBench4K': f'{project_root}/evaluation/results/HRBench4K/decoding_by_steps/{run_name}',
+    'HRBench8K': f'{project_root}/evaluation/results/HRBench8K/decoding_by_steps/{run_name}',
+    'MME-RealWorld-Lite': f'{project_root}/evaluation/results/MME-RealWorld-Lite/decoding_by_steps/{run_name}',
 }
 
 # Collect all results
@@ -495,7 +536,8 @@ for ck in checkpoints:
         all_results[ck][step] = {}
         for ds_name, ds_path in datasets.items():
             json_file = f'{ds_path}/ck-{ck}-step{step}.json'
-            overall, cats = calculate_stats(json_file)
+            use_mme_pr = (ds_name == 'MME-RealWorld-Lite')
+            overall, cats = calculate_stats(json_file, use_mme_pr=use_mme_pr)
             all_results[ck][step][ds_name] = {'overall': overall, 'categories': cats}
             all_categories[ds_name].update(cats.keys())
 

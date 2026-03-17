@@ -10,8 +10,8 @@ Stage 2 在 Qwen2.5-VL-7B（`hidden_size=3584`）基础上引入两个模块：
 
 | 模块 | 结构 | 参数量 | 推理时是否被调用 |
 |------|------|--------|----------------|
-| **BoxFeatureResampler** | learnable queries [1,8,H] + MHA(H,H,8 heads) + LN | **51.43M** | **否**（Teacher，仅训练用） |
-| **DynamicAutoregressiveResampler** | MHA(H,H,8 heads) + LN | **51.40M** | **否**（Student，加载但不调用） |
+| **Box-Guided Compression** | learnable queries [1,8,H] + MHA(H,H,8 heads) + LN | **51.43M** | **否**（Teacher，仅训练用） |
+| **Dynamic Autoregressive Compression** | MHA(H,H,8 heads) + LN | **51.40M** | **否**（Student，加载但不调用） |
 | **合计额外** | — | **102.83M** | **0 FLOPs** |
 
 ### 参数占比
@@ -21,7 +21,7 @@ Stage 2 在 Qwen2.5-VL-7B（`hidden_size=3584`）基础上引入两个模块：
 显存开销 (bf16): 196 MB（相比基础模型 13.2 GB 仅 +1.5%）
 ```
 
-**关键发现：** 两个 resampler 模块在推理 forward 中**均未被调用**。代码注释明确说明 "Do NOT apply box_feature_resampler enhancement here"。它们仅占用显存，不产生推理计算开销。
+**关键发现：** 两个 compression 模块在推理 forward 中**均未被调用**。代码注释明确说明 "Do NOT apply box_feature_resampler enhancement here"。它们仅占用显存，不产生推理计算开销。
 
 ---
 
@@ -62,8 +62,8 @@ EVAL_STEP_LIST="${EVAL_STEP_LIST:-8}"   # 默认 8 步 LVR 思考
 ### 训练 vs 推理
 
 **训练时：**
-- **BoxFeatureResampler（Teacher）**：用 bbox 区域 vision tokens 生成 8 个 latent targets
-- **DynamicAutoregressiveResampler（Student）**：用 LLM 的 8 个连续隐状态 cross-attend 到图像，做 MSE 蒸馏
+- **Box-Guided Compression（Teacher）**：用 bbox 区域 vision tokens 生成 8 个 latent targets
+- **Dynamic Autoregressive Compression（Student）**：用 LLM 的 8 个连续隐状态 cross-attend 到图像，做 MSE 蒸馏
 
 **推理时：**
 - 两者均不调用，完全 Coconut 风格：将 `last_position_hidden_state` 直接作为下一步 input embedding
@@ -96,7 +96,7 @@ if last_position_hidden_state is not None and lvr_mode_switch is not None:
 
 ## 5. 附录：参数计算明细
 
-### BoxFeatureResampler (51.43M)
+### Box-Guided Compression (51.43M)
 
 | 组件 | 形状 | 参数量 |
 |------|------|--------|
@@ -107,7 +107,7 @@ if last_position_hidden_state is not None and lvr_mode_switch is not None:
 | cross_attn out_proj_bias | [3584] | 3,584 |
 | output_norm | [2×3584] | 7,168 |
 
-### DynamicAutoregressiveResampler (51.40M)
+### Dynamic Autoregressive Compression (51.40M)
 
 - `q_proj` / `kv_proj`：均为 None（`llm_hidden_size == vision_dim == hidden_size`）
-- 结构与 BoxFeatureResampler 的 cross_attn + output_norm 相同，无 learnable queries
+- 结构与 Box-Guided Compression 的 cross_attn + output_norm 相同，无 learnable queries

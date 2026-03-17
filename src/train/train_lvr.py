@@ -16,13 +16,12 @@ from src.params import DataArguments, ModelArguments, TrainingArguments
 from src.train.train_utils import safe_save_model_for_hf_trainer
 from monkey_patch_forward_lvr import replace_qwen2_5_with_mixed_modality_forward_lvr
 
-from src.s3_checkpoints_lvr import OCIFolderCheckpointHandler, create_temp_dir
 from src.train.monkey_patch_patch_emb import replace_qwen_2_5_vl_patch_emb
 from src.train.monkey_patch_dataloader import replace_train_dataloader
 
 local_rank = None
 
-# For debugging only Plese comment this during training
+# Uncomment for debugging: sys.excepthook prints full traceback on unhandled exceptions
 # torch.autograd.set_detect_anomaly(True)
 
 def exception_handler(exc_type, exc_value, exc_traceback):
@@ -57,60 +56,39 @@ def configure_vision_tower(model, training_args, compute_dtype, device):
     vision_tower = model.visual
     vision_tower.to(dtype=compute_dtype, device=device)
 
-    # Stage 3 E2E: unfreeze vision and merger for end-to-end reasoning
-    use_stage3 = getattr(model.config, 'use_stage3_e2e', False)
-    freeze_vision = training_args.freeze_vision_tower and not use_stage3
-    freeze_merger = training_args.freeze_merger and not use_stage3
+    freeze_vision = training_args.freeze_vision_tower
+    freeze_merger = training_args.freeze_merger
     vision_model_params = model.visual.parameters()
     set_requires_grad(vision_model_params, not freeze_vision)
     merger_params = model.visual.merger.parameters()
     set_requires_grad(merger_params, not freeze_merger)
 
 def configure_llm(model, training_args):
-    # Stage 3 E2E: unfreeze LLM for end-to-end reasoning
-    use_stage3 = getattr(model.config, 'use_stage3_e2e', False)
-    freeze_llm = training_args.freeze_llm and not use_stage3
+    freeze_llm = training_args.freeze_llm
     lm_head = model.lm_head.parameters()
     set_requires_grad(lm_head, not freeze_llm)
     llm_params = model.model.parameters()
     set_requires_grad(llm_params, not freeze_llm)
 
 def configure_lvr_head(model, training_args):
-    """Configure LVR head parameters - always trainable (not frozen)"""
-    if hasattr(model, 'lvr_head') and model.lvr_head is not None:
-        lvr_head_params = list(model.lvr_head.parameters())
-        set_requires_grad(lvr_head_params, True)  # LVR head is always trainable
-        total_params = sum(p.numel() for p in lvr_head_params if p.requires_grad)
-        rank0_print(f"[INFO] LVR head parameters set to trainable (total params: {total_params})")
-    
-    if hasattr(model, 'lvr_latent_end_emb') and model.lvr_latent_end_emb is not None:
-        model.lvr_latent_end_emb.requires_grad = True
-        rank0_print(f"[INFO] LVR latent end token set to trainable")
-    
-    # Configure learnable latent embeddings for attention isolation
-    if hasattr(model, 'lvr_latent_embeds') and model.lvr_latent_embeds is not None:
-        model.lvr_latent_embeds.requires_grad = True
-        total_params = model.lvr_latent_embeds.numel()
-        rank0_print(f"[INFO] Learnable latent embeddings set to trainable (total params: {total_params}, shape: {model.lvr_latent_embeds.shape})")
-    
-    # Configure BoxFeatureResampler (trainable unless Stage 2/3, then frozen - Stage 3 does not use BCM)
-    use_stage3 = getattr(model.config, 'use_stage3_e2e', False)
+    """Configure Box-Guided Compression and Dynamic Autoregressive Compression parameters"""
+    # Configure Box-Guided Compression (trainable unless Stage 2, then frozen)
     if hasattr(model, 'box_feature_resampler') and model.box_feature_resampler is not None:
-        if getattr(model.config, 'use_stage2_distillation', False) or use_stage3:
+        if getattr(model.config, 'use_stage2_distillation', False):
             set_requires_grad(list(model.box_feature_resampler.parameters()), False)
-            rank0_print(f"[INFO] BoxFeatureResampler (BCM) frozen for Stage 2/3 (Stage 3: no BCM forward)")
+            rank0_print(f"[INFO] Box-Guided Compression (BCM) frozen for Stage 2")
         else:
             resampler_params = list(model.box_feature_resampler.parameters())
             set_requires_grad(resampler_params, True)
             total_params = sum(p.numel() for p in resampler_params if p.requires_grad)
-            rank0_print(f"[INFO] BoxFeatureResampler parameters set to trainable (total params: {total_params})")
+            rank0_print(f"[INFO] Box-Guided Compression parameters set to trainable (total params: {total_params})")
 
-    # Configure DynamicAutoregressiveResampler (Stage 2 Student / Stage 3 DAR - always trainable for CE gradient flow)
+    # Configure Dynamic Autoregressive Compression (Stage 2 Student - always trainable for CE gradient flow)
     if hasattr(model, 'student_resampler') and model.student_resampler is not None:
         student_params = list(model.student_resampler.parameters())
         set_requires_grad(student_params, True)
         total_params = sum(p.numel() for p in student_params if p.requires_grad)
-        rank0_print(f"[INFO] DynamicAutoregressiveResampler (DAR) parameters set to trainable (total params: {total_params})")
+        rank0_print(f"[INFO] Dynamic Autoregressive Compression (DAC) parameters set to trainable (total params: {total_params})")
 
 def train():
     global local_rank
@@ -131,59 +109,6 @@ def train():
     
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    '''
-        set up oci checkpointing;
-        set online_checkpoint to False if you dont need
-    '''
-    oci_handler = None
-    temp_folder = None
-    if training_args.online_checkpoint:
-        # oci keys
-        access_key_id = os.environ.get('ACCESS_KEY_ID')
-        secret_access_key = os.environ.get('SECRET_ACCESS_KEY')
-        endpoint_url = os.environ.get('ENDPOINT_URL')
-        bucket_name = os.environ.get('BUCKET_NAME')
-        region_name = os.environ.get('REGION_NAME', 'us-east-1')  # Default region if not set
-
-        # Validate required OCI environment variables
-        missing_vars = []
-        if not access_key_id:
-            missing_vars.append('ACCESS_KEY_ID')
-        if not secret_access_key:
-            missing_vars.append('SECRET_ACCESS_KEY')
-        if not endpoint_url:
-            missing_vars.append('ENDPOINT_URL')
-        if not bucket_name:
-            missing_vars.append('BUCKET_NAME')
-        
-        if missing_vars:
-            error_msg = f"Error: online_checkpoint is enabled but required environment variables are missing: {', '.join(missing_vars)}"
-            rank0_print(error_msg)
-            raise ValueError(error_msg)
-
-        model_name = model_args.model_id.split('/')[-1]     # "Qwen2.5-VL-7B-Instruct"
-        # local cache dir and tempFile class
-        cache_dir = os.getenv("CACHE_DIR")  #cache dir = "/dockerx/Local/users/bangzheng"
-        # If CACHE_DIR is not set, use a default temporary directory
-        if cache_dir is None:
-            import tempfile
-            cache_dir = os.path.join(tempfile.gettempdir(), "model_cache")
-            os.makedirs(cache_dir, exist_ok=True)
-            rank0_print(f"Warning: CACHE_DIR not set, using default: {cache_dir}")
-        # temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
-        local_model_name_or_path = create_temp_dir(base_path=os.path.join(cache_dir,model_name),prefix=training_args.run_name + '-')     
-        temp_folder = local_model_name_or_path
-
-        # remote dir
-        remote_dir = training_args.output_dir  # output_dir is remote now; "/checkpoints"
-        remote_dir = os.path.join(remote_dir,model_name,training_args.run_name)    # "/checkpoints/Qwen2.5-VL-7B-Instruct/run_name"
-        training_args.remote_output_dir = remote_dir
-        training_args.output_dir = local_model_name_or_path.name    # output_dir should always be local
-
-        # oci handler
-        oci_handler = OCIFolderCheckpointHandler(access_key_id, secret_access_key, endpoint_url, bucket_name, region_name)
-    
-
     local_rank = training_args.local_rank
 
     '''
@@ -194,68 +119,30 @@ def train():
     
     # if we are starting from a checkpoint
     if training_args.checkpoint_name:
-        if training_args.online_checkpoint and oci_handler is not None:
-            # CHKPT_NAME="checkpoints_lvrHead_featureAlign/Qwen2.5-VL-7B-Instruct/BS256-LAMBDA1-LVR_HEAD_LR1e-5-MAXTOKEN{7680}/checkpoint-1578/"
-            local_pth_to_download_chkpt = create_temp_dir(base_path=os.path.join(cache_dir,model_name),prefix=f"warmed_{model_args.lvr_head_type}" + '-')
-            oci_handler.load_checkpoint(training_args.checkpoint_name, local_pth_to_download_chkpt,inference_mode=True)
-            
-            model_pth = local_pth_to_download_chkpt.name
-        else:
-            # Use local checkpoint path when not using online checkpointing
-            model_pth = training_args.checkpoint_name
+        model_pth = training_args.checkpoint_name
     # if its starting a new training
     else:
         model_pth = model_args.model_id
     
     # get the model config
     config = AutoConfig.from_pretrained(model_pth,trust_remote_code=True)
-    config.latent_end_token = model_args.latent_end_token
-    config.lvr_head = model_args.lvr_head
-    config.lvr_head_type = model_args.lvr_head_type
-    config.mlp_ratio = getattr(model_args, 'mlp_ratio', 1.0)
-    rank0_print(f"[INFO] Config mlp_ratio set to: {config.mlp_ratio}")
-    
-    # Set IVR parameters if using IVR type
-    if model_args.lvr_head_type == 'ivr':
-        config.ivr_iterations = getattr(model_args, 'ivr_iterations', 3)
-        config.ivr_chunk_size = getattr(model_args, 'ivr_chunk_size', None)
-        config.ivr_use_output_norm = getattr(model_args, 'ivr_use_output_norm', True)
-        config.ivr_temperature = getattr(model_args, 'ivr_temperature', 1.0)
-        rank0_print(f"[INFO] IVR config: iterations={config.ivr_iterations}, "
-                   f"chunk_size={config.ivr_chunk_size}, use_output_norm={config.ivr_use_output_norm}, "
-                   f"temperature={config.ivr_temperature}")
-    
-    # Set GFR parameters if using GFR type
-    if model_args.lvr_head_type == 'gated-focus' or model_args.lvr_head_type == 'gfr':
-        config.gfr_visual_dim = getattr(model_args, 'gfr_visual_dim', None)
-        config.gfr_chunk_size = getattr(model_args, 'gfr_chunk_size', None)
-        config.gfr_use_output_norm = getattr(model_args, 'gfr_use_output_norm', True)
-        rank0_print(f"[INFO] GFR config: visual_dim={config.gfr_visual_dim}, "
-                   f"chunk_size={config.gfr_chunk_size}, use_output_norm={config.gfr_use_output_norm}")
-
-    # BoxFeatureResampler: fixed num latent tokens per bbox for MSE target
+    config.lvr_head = False
+    config.latent_end_token = False
+    # Box-Guided Compression: fixed num latent tokens per bbox for MSE target
     config.use_box_feature_resampler = getattr(model_args, 'use_box_feature_resampler', False)
     config.use_stage2_distillation = getattr(model_args, 'use_stage2_distillation', False)
-    config.use_stage3_e2e = getattr(model_args, 'use_stage3_e2e', False)
     if config.use_stage2_distillation and not config.use_box_feature_resampler:
-        config.use_box_feature_resampler = True  # Stage 2 requires BoxFeatureResampler as Teacher
-    if config.use_stage3_e2e and not config.use_box_feature_resampler:
-        raise ValueError("use_stage3_e2e requires use_box_feature_resampler=True (load from Stage 2 checkpoint with student_resampler)")
+        config.use_box_feature_resampler = True  # Stage 2 requires Box-Guided Compression as Teacher
     config.num_latent_tokens = getattr(model_args, 'num_latent_tokens', 8)
     if config.use_box_feature_resampler:
-        rank0_print(f"[INFO] BoxFeatureResampler enabled with num_latent_tokens={config.num_latent_tokens}")
+        rank0_print(f"[INFO] Box-Guided Compression enabled with num_latent_tokens={config.num_latent_tokens}")
     if config.use_stage2_distillation:
-        rank0_print(f"[INFO] Stage 2 distillation enabled: DynamicAutoregressiveResampler (Student) + frozen BoxFeatureResampler (Teacher)")
-    if config.use_stage3_e2e:
-        rank0_print(f"[INFO] Stage 3 E2E enabled: CE loss only, no distillation. DAR in forward path for end-to-end reasoning unlock.")
+        rank0_print(f"[INFO] Stage 2 distillation enabled: Dynamic Autoregressive Compression (Student) + frozen Box-Guided Compression (Teacher)")
 
     # Load model based on model type
     if "Qwen2.5" in model_args.model_id:
-        # Patch the forward function
+        # Patch the forward function (two-stage: resampler only, no lvr_head/latent_end/mode_switch)
         replace_qwen2_5_with_mixed_modality_forward_lvr(coconut=model_args.coconut,
-                                                        lvr_head=model_args.lvr_head,
-                                                        mode_switch_loss=training_args.mode_switch_loss,
-                                                        latent_end_token=model_args.latent_end_token,
                                                         use_box_feature_resampler=getattr(model_args, 'use_box_feature_resampler', False),
                                                         use_stage2_distillation=getattr(model_args, 'use_stage2_distillation', False))
         
@@ -266,34 +153,6 @@ def train():
             attn_implementation="flash_attention_2" if not training_args.disable_flash_attn2 else "sdpa",
         )
 
-        # init lvr_head (if not already initialized in __init__ or needs reinitialization)
-        if model_args.lvr_head:
-            mlp_ratio = getattr(model_args, 'mlp_ratio', 1.0)
-            # Check if LVR head already exists and has correct mlp_ratio
-            if hasattr(model, 'lvr_head') and model.lvr_head is not None:
-                # Verify mlp_ratio matches (for attention-mask type)
-                if model_args.lvr_head_type == 'attention-mask':
-                    current_mlp_ratio = getattr(model.config, 'mlp_ratio', 1.0)
-                    if abs(current_mlp_ratio - mlp_ratio) < 1e-6:
-                        rank0_print(f"[INFO] LVR head already initialized with mlp_ratio={mlp_ratio}, skipping reinitialization")
-                    else:
-                        rank0_print(f"[INFO] Reinitializing LVR head: mlp_ratio {current_mlp_ratio} -> {mlp_ratio}")
-                        model._init_lvr_head(lvr_head_type=model_args.lvr_head_type, 
-                                            mlp_ratio=mlp_ratio)
-                else:
-                    rank0_print(f"[INFO] LVR head already initialized, skipping reinitialization")
-            else:
-                rank0_print(f"[INFO] Initializing LVR head with mlp_ratio={mlp_ratio}")
-                model._init_lvr_head(lvr_head_type=model_args.lvr_head_type, 
-                                    mlp_ratio=mlp_ratio)
-        
-        # init latent_end_token
-        if model_args.latent_end_token:
-            model._init_lvr_latent_end_emb()
-        # Always set loss_mode_switch_fct (forward uses getattr with default, but explicit is safer)
-        model.config.loss_mode_switch_fct = training_args.loss_mode_switch_fct
-
-        
         ''' Patch the patch-emb with fp32; Avoid edge-case nermical stability issue '''
         replace_qwen_2_5_vl_patch_emb()
 
@@ -305,18 +164,9 @@ def train():
     configure_llm(model_to_configure, training_args)
     configure_vision_tower(model_to_configure, training_args, compute_dtype, training_args.device)
     
-    # Configure LVR head and/or BoxFeatureResampler
-    if model_args.lvr_head or getattr(model_args, 'use_box_feature_resampler', False) or getattr(model_args, 'use_stage2_distillation', False) or getattr(model_args, 'use_stage3_e2e', False):
+    # Configure Box-Guided Compression / Dynamic Autoregressive Compression
+    if getattr(model_args, 'use_box_feature_resampler', False) or getattr(model_args, 'use_stage2_distillation', False):
         configure_lvr_head(model, training_args)  # Ensure LVR head / resampler is trainable
-
-    ''' NaN sanitizer: Hook the patch-emb with torch.nan_to_num() '''
-    # def output_nan_sanitizer_hook(module, input, output):
-    #     if isinstance(output, torch.Tensor) and torch.isnan(output).any():
-    #         print(f"[Sanitizer] {module.__class__.__name__}: NaN or Inf detected.")
-    #         print(f"  Output stats - min: {output.min().item()}, max: {output.max().item()}, mean: {output.mean().item()}")
-    #         return torch.nan_to_num(output, nan=0.0, posinf=1e4, neginf=-1e4)
-    #     return output
-    # model.model.visual.patch_embed.register_forward_hook(output_nan_sanitizer_hook)
 
     if training_args.gradient_checkpointing:
         model.enable_input_require_grads()
@@ -325,10 +175,10 @@ def train():
     # configure processors and special tokens
     processor = AutoProcessor.from_pretrained(model_args.model_id,min_pixels=data_args.image_min_pixels,max_pixels=data_args.image_max_pixels)
 
-    processor.tokenizer.add_tokens("<|lvr_start|>",special_tokens=True)
-    processor.tokenizer.add_tokens("<|lvr|>",special_tokens=True)
-    processor.tokenizer.add_tokens("<|lvr_latent_end|>",special_tokens=True)
-    processor.tokenizer.add_tokens("<|lvr_end|>",special_tokens=True)
+    processor.tokenizer.add_tokens("<|lvr_start|>", special_tokens=True)
+    processor.tokenizer.add_tokens("<|lvr|>", special_tokens=True)
+    processor.tokenizer.add_tokens("<|lvr_latent_end|>", special_tokens=True)
+    processor.tokenizer.add_tokens("<|lvr_end|>", special_tokens=True)
 
     lvr_id = processor.tokenizer.convert_tokens_to_ids("<|lvr|>")
     lvr_latent_end_id = processor.tokenizer.convert_tokens_to_ids("<|lvr_latent_end|>")
@@ -362,23 +212,17 @@ def train():
     # model.config.tokenizer_model_max_length = processor.tokenizer.model_max_length
     if training_args.enable_data_packing:
         training_args.per_device_train_batch_size = 1
+        fixed_num = (model_args.num_latent_tokens if getattr(model_args, 'use_box_feature_resampler', False) else getattr(data_args, 'fixed_num_of_lvr_tokens', None))
         if model_args.max_lvr_tokens is not None:
-            data_module, total_data_len = make_packed_supervised_data_module_lvr_fixedToken(model_id=model_args.model_id,
-                                                                                            processor=processor,
-                                                                                            max_lvr_tokens=model_args.max_lvr_tokens,
-                                                                                            data_args=data_args,
-                                                                                            training_args=training_args,
-                                                                                            latent_end_token=model_args.latent_end_token)
-        else:
-            fixed_num = (model_args.num_latent_tokens if getattr(model_args, 'use_box_feature_resampler', False) else getattr(data_args, 'fixed_num_of_lvr_tokens', None))
-            data_module, total_data_len = make_packed_supervised_data_module_lvr(
-                model_id=model_args.model_id,
-                processor=processor,
-                data_args=data_args,
-                training_args=training_args,
-                latent_end_token=model_args.latent_end_token,
-                fixed_num_of_lvr_tokens=fixed_num,
-            )
+            fixed_num = model_args.max_lvr_tokens
+        data_module, total_data_len = make_packed_supervised_data_module_lvr(
+            model_id=model_args.model_id,
+            processor=processor,
+            data_args=data_args,
+            training_args=training_args,
+            latent_end_token=False,
+            fixed_num_of_lvr_tokens=fixed_num,
+        )
         if not training_args.max_steps:
             training_args.max_steps = total_data_len // (training_args.gradient_accumulation_steps 
                                                          * training_args.world_size
@@ -390,13 +234,10 @@ def train():
                                               processor=processor,
                                               data_args=data_args)
     
-    # tempFolder = temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
     trainer = QwenLVRSFTTrainer(
         model=model,
         processing_class=processor,
         args=training_args,
-        temp_folder=temp_folder,
-        oci_handler=oci_handler,
         **data_module
     )
 

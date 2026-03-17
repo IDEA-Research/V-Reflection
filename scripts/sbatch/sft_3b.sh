@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:hgx:8 # A800
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/lvr_stage1_3b_%j.txt
+#SBATCH --output=logs/lvr_stage1_3b_%j.txt
 
 # ============================================================================
 # Activate Conda Environment
@@ -17,7 +17,9 @@ conda activate train
 # ============================================================================
 # Set Working Directory
 # ============================================================================
-cd /comp_robot/zhoujiazhou/projects/Active-Coconut
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 echo "Working directory: $(pwd)"
 
 # Add project root and src/train to PYTHONPATH so Python can find modules
@@ -59,7 +61,7 @@ export PYTORCH_ALLOC_CONF=expandable_segments:True
 export WANDB_MODE="${WANDB_MODE:-online}"
 
 # Set wandb project name
-export WANDB_PROJECT="${WANDB_PROJECT:-Dynamic-Coconut}"
+export WANDB_PROJECT="${WANDB_PROJECT:-V-Reflection}"
 
 # ============================================================================
 # Model Configs
@@ -101,7 +103,6 @@ GRAD_ACCUM_STEPS=8
 
 # LLM-related params
 LR=1e-5
-LVR_HEAD=False
 
 # LVR-related params
 LVR_LOSS_FCT=mse
@@ -163,7 +164,6 @@ $DEEPSPEED_CMD src/train/train_lvr.py \
     --model_id $MODEL_NAME \
     --data_path "$DATA_PATH" \
     --remove_unused_columns False \
-    --lvr_head $LVR_HEAD \
     --freeze_vision_tower True \
     --freeze_merger True \
     --freeze_llm False \

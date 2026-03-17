@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:hgx:1 # A800
 #SBATCH --mem=80G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/evaluation/lvr_stage1_3b_step4_1000_%j.txt
+#SBATCH --output=/comp_robot/zhoujiazhou/projects/V-Reflection/logs/evaluation/lvr_stage1_3b_step4_1000_%j.txt
 #SBATCH --nodelist=hgx052
 
 # ============================================================================
@@ -24,7 +24,7 @@
 # Configuration - Model Settings
 # ============================================================================
 # Model checkpoint path - Edit this to point to your trained model
-CHECKPOINT_PATH="/comp_robot/zhoujiazhou/projects/Active-Coconut/stage1_checkpoints/checkpoint-1000"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/V-Reflection/result/stage1_3b/bs6_gradAcc8_mseLVR0.1-MaxVisToken5120-MinVisToken128/checkpoint-2500}"
 
 EVAL_STEP_LIST="${EVAL_STEP_LIST:-4}"  # Default: 4,8,16
 # ============================================================================
@@ -42,7 +42,8 @@ if command -v conda &> /dev/null; then
 fi
 
 # Setup working directory and Python path
-PROJECT_ROOT="/comp_robot/zhoujiazhou/projects/Active-Coconut"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$PROJECT_ROOT" || exit 1
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 

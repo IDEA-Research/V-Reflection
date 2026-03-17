@@ -755,10 +755,12 @@ def load_model_and_processor(chkpt_pth):
         config = AutoConfig.from_pretrained(chkpt_pth)
         # Pass additional config parameters to ensure inference mode matches training mode
         use_box_feature_resampler = getattr(config, 'use_box_feature_resampler', False)
+        use_stage2_distillation = getattr(config, 'use_stage2_distillation', False)
         replace_qwen2_5_with_mixed_modality_forward_lvr(
             inference_mode=True,
-            lvr_head=config.lvr_head,
+            coconut=True,
             use_box_feature_resampler=use_box_feature_resampler,
+            use_stage2_distillation=use_stage2_distillation,
         )
         
         model = QwenWithLVR.from_pretrained(
@@ -2399,8 +2401,8 @@ def main():
         else:
             gen_w_head = model.config.lvr_head
 
-        # EVAL_BENCHMARKS: comma-separated list to run (e.g. "blink,MathVision,EMMA"). If empty, run all.
-        eval_benchmarks = os.environ.get('EVAL_BENCHMARKS', '')
+        # EVAL_BENCHMARKS: comma-separated list to run. Default: BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite
+        eval_benchmarks = os.environ.get('EVAL_BENCHMARKS', 'BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite')
         if eval_benchmarks:
             bench_set = {b.strip().lower() for b in eval_benchmarks.split(',') if b.strip()}
             config_items = [(k, v) for k, v in DATASET_CONFIG.items() if k.lower() in bench_set]

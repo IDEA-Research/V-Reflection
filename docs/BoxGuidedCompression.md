@@ -1,8 +1,8 @@
-# BoxFeatureResampler 技术文档
+# Box-Guided Compression 技术文档
 
 ## 概述
 
-BoxFeatureResampler 是一个将**可变长度的 bbox 视觉特征**压缩为**固定 8 个 latent token** 的模块，用于 LVR (Latent Visual Reasoning) 训练。
+Box-Guided Compression 是一个将**可变长度的 bbox 视觉特征**压缩为**固定 8 个 latent token** 的模块，用于 LVR (Latent Visual Reasoning) 训练。
 
 ## 动机
 
@@ -11,7 +11,7 @@ BoxFeatureResampler 是一个将**可变长度的 bbox 视觉特征**压缩为**
 1. **序列长度不固定**：不同样本的 `<lvr>` token 数量不同，难以批处理
 2. **信息冗余**：大 bbox 可能有上千个 token，但实际有用信息可能很少
 
-BoxFeatureResampler 通过 **cross-attention** 将可变长特征压缩为固定 8 个 latent，解决上述问题。
+Box-Guided Compression 通过 **cross-attention** 将可变长特征压缩为固定 8 个 latent，解决上述问题。
 
 ## 架构
 
@@ -35,7 +35,7 @@ BoxFeatureResampler 通过 **cross-attention** 将可变长特征压缩为固定
 ### 核心代码
 
 ```python
-class BoxFeatureResampler(nn.Module):
+class BoxGuidedCompression(nn.Module):
     def __init__(self, hidden_size, num_queries=8, num_heads=None, vision_dim=None):
         self.queries = nn.Parameter(torch.randn(1, num_queries, hidden_size) * 0.02)
         self.cross_attn = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
@@ -67,8 +67,8 @@ class BoxFeatureResampler(nn.Module):
 │    lvr_tokens[i] = GT bbox 在 image_embeds 中的索引 (可变长)                │
 │    _prepare_bbox_region_features → (num_bboxes, max_N, D), padding_mask    │
 │                                                                            │
-│  Step 3: Resampler 压缩                                                     │
-│    BoxFeatureResampler(bbox_feats) → fill_embeds (num_bboxes, 8, D)        │
+│  Step 3: Box-Guided Compression 压缩                                       │
+│    BoxGuidedCompression(bbox_feats) → fill_embeds (num_bboxes, 8, D)       │
 │                                                                            │
 │  Step 4: 填充 inputs_embeds                                                 │
 │    fill_embeds.detach() → inputs_embeds[<lvr>位置]                          │
@@ -109,7 +109,7 @@ Total Loss = loss_ce + λ_resampler * loss_lvr_resampler
 
 | 参数 | 说明 | 默认值 |
 |------|------|--------|
-| `--use_box_feature_resampler` | 启用 BoxFeatureResampler | False |
+| `--use_box_feature_resampler` | 启用 Box-Guided Compression | False |
 | `--num_latent_tokens` | 每个 bbox 的固定 latent 数 | 8 |
 | `--loss_lvr_resampler_lambda` | resampler loss 权重 | 0.1 |
 | `--latent_end_token` | 是否使用 `<lvr_latent_end>` | False (推荐) |
@@ -141,7 +141,7 @@ deepspeed src/train/train_lvr.py \
 ```
 src/
 ├── model/
-│   ├── lvr_heads.py          # BoxFeatureResampler 类定义
+│   ├── lvr_heads.py          # BoxGuidedCompression 类定义
 │   └── qwen_lvr_model.py     # 模型初始化 (_init_box_feature_resampler)
 ├── train/
 │   ├── train_lvr.py          # 训练入口，配置 resampler 可训练

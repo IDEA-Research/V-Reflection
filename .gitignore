@@ -39,12 +39,14 @@ logs/
 result/
 wandb/
 doc/
-lvr-main/
 checkpoints/
 
 # Data (uncomment if you don't want to commit data)
 data/
-evaluation/
+
+# Evaluation results and logs (keep evaluation/*.py scripts)
+evaluation/results/
+evaluation/*.log
 # OS
 .DS_Store
 Thumbs.db
@@ -57,4 +59,7 @@ core.*
 # Environment variables
 .env
 .env.local
+
+# Hugging Face upload temp
+.hf_upload_temp/
 

@@ -1,38 +1,20 @@
-# Latent Visual Reasoning
+# Latent Visual Reasoning: Autoregressive Reasoning in the Visual Embedding Space
 
-This repository contains a script for training [Latent Visual Reasoning](https://www.arxiv.org/abs/2509.24251) based on [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct).
+Authors: Jiazhou Zhou, Yucheng Chen, Hongyang Li, Qing Jiang,,Hu Zhou, Ying-Cong Chen, Lei Zhang
 
-## Update
-
-- [2025/10/02] 🔥Code base released.
-
-## Table of Contents
-
-- [Latent Visual Reasoning](#latent-visual-reasoning)
-  - [Update](#update)
-  - [Table of Contents](#table-of-contents)
-  - [Supported Features](#supported-features)
-  - [Environments](#environments)
-  - [Model Weights](#model-weights)
-  - [Dataset Preparation](#dataset-preparation)
-  - [Training LVR](#training-lvr)
-    - [Stage-1 SFT](#full-finetuning)
-    - [Stage-2 GRPO<sub>latent</sub>](#stage-2-GRPO<sub>latent</sub>)
-  - [Inference](#inference)
-  - [TODO](#todo)
-  - [Known Issues](#known-issues)
-  - [License](#license)
-  - [Citation](#citation)
-  - [Acknowledgement](#acknowledgement)
-
-## Supported Features
-
-- Deepspeed
-- Full-finetuning
-- GRPO<sub>latent</sub>
+[![Paper](https://img.shields.io/badge/ArXiv-Paper-brown.svg?logo=arxiv)](https://arxiv.org/abs/2509.24251)
+[![Model](https://img.shields.io/badge/Model-HuggingFace-blue.svg?logo=huggingface)](https://huggingface.co/garlandchou/V-Reflection)
+[![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
 
 
-### Environments
+This repository contains the official implementation of **V-Reflection: Transforming MLLMs from Passive
+Observers to Active Interrogators**, enabling autoregressive reasoning directly in the visual embedding space for Multimodal Large Language Models. Built on [Qwen2.5-VL](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct).
+
+<p align="center">
+  <img src="./imgaes/Tesear.png" width="90%">
+</p>
+
+## Installation
 
 ```bash
 conda env create -f environment.yaml
@@ -41,195 +23,208 @@ pip install qwen-vl-utils
 pip install flash-attn --no-build-isolation
 ```
 
-**Note:** You should install flash-attn after installing the other packages.<br>
-**Note:** This project is forked from [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune) where you can find more instructions on environments.
+**Note:** Install flash-attn after the other packages (requires CUDA build). For wandb logging, run `wandb login` or set `WANDB_API_KEY`. This project is forked from [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune).
 
-## Model Weights
-Model checkpoints are accessible from [vincentleebang/LVR-7B](https://huggingface.co/vincentleebang/LVR-7B)
+## Data Preparation
 
-## Dataset Preparation
+### 1. Download Annotations
 
-### Data ###
-Please download the training data through [this link](https://drive.google.com/file/d/1RUbKMQU3H7u8iWDqpDv8aiYDMlUaDIlE/view?usp=sharing) where we provide formatted training data for Latent Visual Reasoning.
+We provide pre-formatted LVR training data. Download from [Huggingface](https://huggingface.co/garlandchou/V-Reflection) and place the JSON files in `./data/`.
 
-To train LVR with your own data: The script requires a dataset formatted according to the LLaVA specification. The dataset should be a JSON file where each entry contains information about conversations and images. Ensure that the image paths in the dataset match the provided `--image_folder`.<br>
+The directory structure after downloading should be:
 
-**Please see the example below and follow format your data. The \<image\> and \<lvr\> token are placeholders for data collation.**<br>
+```shell
+data/
+├── meta_data_lvr_sft_stage1.json       # Meta config for default (SROIE + DUDE)
+├── viscot_sroie_dude_lvr_formatted.json # SROIE + DUDE subset
+└── viscot_363k_lvr_formatted.json      # Full 363K Visual CoT dataset
+```
 
-<details>
-<summary>Example for Stage-1 SFT dataset</summary>
+### 2. Download Images
+
+Download images for the [Visual CoT](https://github.com/deepcs233/Visual-CoT) dataset. Some sources may require registration or form completion.
+
+| Dataset | Source |
+|:-------:|:------:|
+| COCO | [train2017](https://cocodataset.org/#download) / [train2014](https://cocodataset.org/#download) |
+| GQA | [images](https://cs.stanford.edu/people/dorarad/gqa/download.html) |
+| Flickr30k | [homepage](https://www.kaggle.com/datasets/hsankesara/flickr-image-dataset) |
+| TextVQA | [train_val_images](https://textvqa.org/dataset/) |
+| DocVQA | [homepage](https://rrc.cvc.uab.es/?ch=17) |
+| InfographicsVQA | [homepage](https://rrc.cvc.uab.es/?ch=17) |
+| Open Images | [download script](https://github.com/deepcs233/Visual-CoT) (splits 0–5) |
+| VSR | [images](https://github.com/cambridgeltl/visual-spatial-reasoning) |
+| DUDE | [images](https://github.com/deepcs233/Visual-CoT) |
+| SROIE | [homepage](https://rrc.cvc.uab.es/?ch=13) |
+| CUB | [images](https://www.vision.caltech.edu/datasets/cub_200_2011/) |
+| Visual7W | [repo](https://github.com/deepcs233/Visual-CoT) |
+
+### 3. Organize Directory Structure
+
+Place images under `{image_folder}` (e.g. `./data/images` or your custom path). The structure should match the paths in the annotation JSON:
+
+```shell
+{image_folder}/
+├── coco/
+│   ├── train2017/
+│   └── train2014/
+├── gqa/
+│   └── images/
+├── flickr30k/
+│   └── flickr30k-images/
+├── textvqa/
+│   └── train_images/
+├── docvqa/
+├── infographicsvqa/
+├── openimages/          # only need train_0 ... train_5
+├── vsr/
+│   └── images/
+├── dude/
+│   └── viscot/dude/      # or DUDE_train-val-test_binaries/images/train/
+├── sroie/
+│   └── viscot/sroie/
+├── cub/
+│   └── CUB_200_2011/images/
+└── visual7w/
+    └── images/
+```
+
+### 4. Dataset Configuration
+
+Set `--data_path` to a meta JSON that lists your formatted datasets. Example `data/meta_data_lvr_sft_stage1.json`:
 
 ```json
 [
-  {
-    "dataset": "flickr30k", 
-    "split": "train", 
-    "question_id": 31593, 
-    "image": ["viscot/flickr30k/2618322793.jpg"], 
-    "conversations": [
-          {
-            "from": "human", 
-            "value": "<image>\nCan you describe the lower apparel of the child on the swing?\nProvide a short and direct response."
-          }, 
-          {
-            "from": "gpt", "value": "<lvr>\n<answer> The child on the swing is wearing dark blue denim shorts. </answer>"
-          }
-    ], 
-    "bboxes": [[0.382, 0.456, 0.718, 0.656]]
-  }
-  ...
+  {"ds_name": "viscot_1", "data_path": "data/viscot_sroie_dude_lvr_formatted.json", "image_folder": "/path/to/images", "ds_type": "Q_A"},
+  {"ds_name": "viscot_2", "data_path": "data/viscot_363k_lvr_formatted.json", "image_folder": "/path/to/images", "ds_type": "Q_A"}
 ]
 ```
 
-</details>
+- **default**: `meta_data_lvr_sft_stage1.json` (SROIE + DUDE subset)
+- **viscot_full**: `meta_data_lvr_sft_stage1_viscot_full.json` (363K with COCO/OpenImages). Set `DATASET_CONFIG=viscot_full` when training.
 
+### 5. Data Format
+
+Each entry follows LLaVA specification with `image`, `conversations`, and `bboxes`. The `<image>` and `<lvr>` are placeholders for data collation.
 
 <details>
-<summary>Example for Stage-2 GRPO<sub>latent</sub> dataset</summary>
+<summary>Example dataset entry</summary>
 
 ```json
-[
-  {
-    "dataset": "ViRL39K", 
-    "id": "MMK12-abc85ebc-7a73-4d55-80a8-ca256f84069c", 
-    "image": "ViRL39K/MMK12-abc85ebc-7a73-4d55-80a8-ca256f84069c-0.png", 
-    "conversations": [
-      {
-        "from": "human", 
-        "value": "As shown in the figure, $$AB \\perp CD$$ at point $$C$$, $$CE \\perp CF$$, then there are ___ pairs of complementary angles in the figure."
-      }, 
-      {
-        "from": "gpt", 
-        "value": "<answer>4</answer>"
-      }
-    ]
-  }
-  ...
-]
+{
+  "dataset": "flickr30k",
+  "image": ["viscot/flickr30k/2618322793.jpg"],
+  "conversations": [
+    {"from": "human", "value": "<image>\nCan you describe the lower apparel of the child on the swing?\nProvide a short and direct response."},
+    {"from": "gpt", "value": "<lvr>\n<answer> The child on the swing is wearing dark blue denim shorts. </answer>"}
+  ],
+  "bboxes": [[0.382, 0.456, 0.718, 0.656]]
+}
 ```
-
-**Note:** You should remove all `<image>`tokens in your dataset. It works a bit different with other training methods.
 
 </details>
 
-<br><br>
+## Evaluation
 
-## Training LVR
+First, download our provided [model weights](https://huggingface.co/garlandchou/V-Reflection), and set `EVAL_CHECKPOINT_PATH` to your checkpoint directory.
 
-**Note:** We use a data packing strategy adapted from InternVL, where short instances are packed together while long instances are left unaltered to maximize GPU utilization. You can enable this feature by setting `--enable_data_packing True`.<br><br>
-**Tip:** The 3D convolution module in Qwen2.5-VL's visual encoding process can introduce NaN due to numeric stability. Please refer to src/train/monkey_patch_patch_emb.py.
 
-To run the training script, use the following command:
-
-### Stage-1 SFT
+For full benchmark evaluation (BLINK, MMVP, VSTAR, HRBench4K, HRBench8K, MME-RealWorld-Lite):
 
 ```bash
-bash scripts/finetune_lvr_stage1_7b.sh
+bash scripts/evaluation/evaluation_7b_stage2.sh
 ```
 
-<details>
-<summary>Training arguments</summary>
+## Training
 
-- `--deepspeed` (str): Path to DeepSpeed config file (default: "scripts/zero2.json").
-- `--data_path` (str): Path to the LLaVA formatted training data (a JSON file). **(Required)**
-- `--image_folder` (str): Path to the images folder as referenced in the LLaVA formatted training data. **(Required)**
-- `--model_id` (str): Path to the Qwen2-VL model. **(Required)**
-- `--output_dir` (str): Output directory for model checkpoints
-- `--num_train_epochs` (int): Number of training epochs (default: 1).
-- `--per_device_train_batch_size` (int): Training batch size per GPU per forwarding step.
-- `--gradient_accumulation_steps` (int): Gradient accumulation steps (default: 4).
-- `--freeze_vision_tower` (bool): Option to freeze vision_model (default: False).
-- `--freeze_llm` (bool): Option to freeze LLM (default: False).
-- `--freeze_merger` (bool): Option to tune projector (default: False).
-- `--vision_lr` (float): Learning rate for vision_model.
-- `--merger_lr` (float): Learning rate for merger(projector).
-- `--learning_rate` (float): Learning rate for language module.
-- `--bf16` (bool): Option for using bfloat16.
-- `--fp16` (bool): Option for using fp16.
-- `--image_min_pixels` (int): Option for minimum input tokens for image.
-- `--image_max_pixles` (int): Option for maximum maxmimum tokens for image.
-- `--max_seq_length` (int): Maximum sequence length (default: 32K).
-- `--bits` (int): Quantization bits (default: 16).
-- `--disable_flash_attn2` (bool): Disable Flash Attention 2.
-- `--report_to` (str): Reporting tool (choices: 'tensorboard', 'wandb', 'none') (default: 'tensorboard').
-- `--logging_dir` (str): Logging directory (default: "./tf-logs").
-- `--logging_steps` (int): Logging steps (default: 1).
-- `--dataloader_num_workers` (int): Number of data loader workers (default: 4).
-- `--precompute_ref_log_probs` (bool): Wheter to precompute the reference log probs (default: False)
-- `--beta` (float): The beta value for DPO (default: 0.1)
-
-</details>
-
-### Stage-2 GRPO<sub>latent</sub>
+**Stage 1 (Box-Guided Compression):** Compresses variable-length bbox visual features into fixed 8 latent tokens via cross-attention. Set `--data_path` and `--image_folder` in the script.
 
 ```bash
-bash scripts/finetune_lvr_stage2_7b.sh
+bash scripts/sbatch/sft_7b_stage1_box_resampler.sh
 ```
 
+**Stage 2 (Dynamic Autoregressive Compression):** Teacher-Student distillation. Requires a Stage 1 checkpoint.
 
-<br>
+```bash
+export CHECKPOINT_PATH="path/to/stage1_checkpoint"
+bash scripts/sbatch/sft_7b_stage2_distillation.sh
+```
 
-### Prerequisites
+**Note:** We use data packing (InternVL-style). Enable with `--enable_data_packing True`.
 
-| What                      | Where                       | Notes                                                                                       |
-| ------------------------- | --------------------------- | ------------------------------------------------------------------------------------------- |
-| **Reward functions**      | `src/train/reward_funcs.py` | Add any function that ends with `_reward`. The training script picks them up automatically. |
-| **Custom system prompts** | `src/constants.py`          | Append your own prompt strings here.                                                        |
+## Models
 
-You could start training using this script.<br>
-Before training, **Please check the dataset format once more.** The format is a bit different from other training methods.
-Most of the training arugments are same as SFT, but few other arguments are added for GRPO training.
+We provide checkpoints for V-Reflection. Results on visual perception and high-resolution benchmarks:
 
-<details>
-<summary>Training arguments</summary>
+**Table 1: Visual perception and cognitive benchmarks (7B)**
 
-- `--temperature` (float): Generation config (default: 0.9)  <- LVR is quite sensitive to temperature during RL. Too large or too small temperature may 
-- `--top_p` (float): Generation config (default: 1.0)
-- `--top_k` (int): Generation config (default: 50)
-- `--min_p` (float): Generation config (default: None)
-- `--repetition_penalty` (float): Generation config (default: 1.0)
-- `--max_completion_length` (int): Max length for the completion (default: 256)
-- `--max_prompt_length` (int): Max length for the prompt (default: 512)
-- `--beta` (float): KL Coefficient. (default: 0.04)
+| Benchmark | V-Reflection (ours) | Qwen2.5-VL-7B |
+|:---------:|:-------------------:|:-------------:|
+| MMVP      | **72.3**             | 66.7          |
+| BLINK     | **56.4**             | 54.5          |
+| V*        | **81.7**             | 78.5          |
 
-</details>
+**Table 2: Real-world high-resolution perception and reasoning benchmarks (8B)**
 
-**Note:** **Liger GRPO loss** and **vLLM back-end** are not yet supported. Both will be added soon.
+| Benchmark | V-Reflection (ours) | Qwen2.5-VL-7B |
+|:---------:|:-------------------:|:-------------:|
+| HRBench-4K | **72.6**            | 68.0          |
+| HRBench-8K | **66.3**            | 63.8          |
+| MME-Real-Lite | **53.9**         | 45.8          |
 
-## Inference
+| Model | Download |
+|:-----:|:--------:|
+| V-Reflection | [HuggingFace](https://huggingface.co/garlandchou/V-Reflection) |
 
-We provide a evaluation file in evaluation/ which by default uses max-step decoding. All variants of decoding strategies are in src/model/qwen_lvr_model.py for reference.
+## Method
 
+<p align="center">
+  <img src="./imgaes/Framework.png" width="90%">
+</p>
 
-## TODO
+- **Stage 1 (BCM):** Box-Guided Compression with *Stochastic Decoupled Alignment* — bidirectional symmetric loss to jointly train resampler and LLM.
+- **Stage 2 (DAC):** Dynamic Autoregressive Compression — Student uses LLM hidden states as Queries, full-image features as K/V, MSE distillation to frozen Teacher.
+- **Inference:** Coconut-style decoding — `last_position_hidden_state` as next-step input embedding for 8-step latent reasoning.
 
-- [ ] Upload docker file for easy deployment
+See `docs/BoxGuidedCompression.md` and `docs/Stage2_Distillation.md` for details.
 
-## Known Issues
+## Qualitative Results
 
-- Transformer version mismatch: the RL bode base may require transformers>=4.54.0 where they updated the abstract model architechture.
+**Training Attention (Stage 2):** Teacher vs Student attention maps during distillation.
 
-## License
+<p align="center">
+  <img src="./imgaes/Train_Attn.png" width="90%">
+</p>
 
-This project is licensed under the Apache-2.0 License. See the [LICENSE](LICENSE) file for details.
+**Inference Attention:** Coconut-style latent reasoning visualization during inference.
+
+<p align="center">
+  <img src="./imgaes/Inference_Attn.png" width="90%">
+</p>
 
 ## Citation
 
-If you find this repository useful in your project, please consider giving a :star: and citing:
+If you find this work helpful for your research, please cite:
 
 ```bibtex
 @misc{li2025lvr,
-      title={Latent Visual Reasoning}, 
-      author={Bangzheng Li and Ximeng Sun and Jiang Liu and Ze Wang and Jialian Wu and Xiaodong Yu and Hao Chen and Emad Barsoum and Muhao Chen and Zicheng Liu},
-      year={2025},
-      journal={arXiv preprint arXiv:2509.24251}
+  title={Latent Visual Reasoning},
+  author={Bangzheng Li and Ximeng Sun and Jiang Liu and Ze Wang and Jialian Wu and Xiaodong Yu and Hao Chen and Emad Barsoum and Muhao Chen and Zicheng Liu},
+  year={2025},
+  journal={arXiv preprint arXiv:2509.24251}
 }
 ```
 
 ## Acknowledgement
 
-This project is based on
+We would like to thank the authors of the following projects for their excellent work:
 
-- [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune): An open-source project for finetuning Qwen-2-VL/Qwen-2.5VL models.
-- [Qwen2.5-VL](https://github.com/QwenLM/Qwen3-VL): MLLM series from Qwen family. 
-- [InternVL](https://github.com/OpenGVLab/InternVL/tree/main): Open-source MLLM family by Shanghai AI Lab. They also opensourced awesome tools for training MLLMs.
+- [Qwen2.5-VL](https://github.com/QwenLM/Qwen3-VL) - MLLM series from Qwen family
+- [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune) - Open-source project for finetuning Qwen-2-VL/Qwen-2.5VL models
+- [LVR](https://github.com/VincentLeebang/lvr) - Latent Visual Reasoning model by Vincent Lee
+- [Visual-CoT](https://github.com/deepcs233/Visual-CoT) - Visual CoT dataset
+- [InternVL](https://github.com/OpenGVLab/InternVL) - Open-source MLLM family by Shanghai AI Lab
+
+## License
+
+This project is licensed under the Apache-2.0 License. See the [LICENSE](LICENSE) file for details.

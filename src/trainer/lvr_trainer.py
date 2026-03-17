@@ -23,9 +23,8 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
     if hasattr(param, "ds_id"):
-        if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
-            if not ignore_status:
-                print(name, "no ignore status")
+        if param.ds_status == ZeroParamStatus.NOT_AVAILABLE and not ignore_status:
+            pass  # Param not available, will gather
         with zero.GatheredParameters([param]):
             param = param.data.detach().cpu().clone()
     else:
@@ -33,13 +32,6 @@ def maybe_zero_3(param, ignore_status=False, name=None):
     return param
 
 class QwenLVRSFTTrainer(Trainer):
-
-    def __init__(self, *args, temp_folder=None, oci_handler=None, **kwargs):
-        super(QwenLVRSFTTrainer, self).__init__(*args, **kwargs)
-        
-        # Initialize attributes for online checkpointing (can be None if not using online checkpointing)
-        self.oci_handler = oci_handler
-        self.temp_folder = temp_folder     # temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
 
     def create_optimizer(self):
         """
@@ -222,21 +214,6 @@ class QwenLVRSFTTrainer(Trainer):
         if self.args.push_to_hub:
             self._push_from_checkpoint(output_dir)
 
-        # output_dir is local; now we save to cloud if needed
-        if self.temp_folder and self.oci_handler:
-            # Only upload to cloud if both temp_folder and oci_handler are set
-            if hasattr(self.args, 'remote_output_dir') and self.args.remote_output_dir:
-                remote_chkpt_folder = os.path.join(self.args.remote_output_dir, checkpoint_folder)
-                if remote_chkpt_folder[0] == '/':
-                    remote_chkpt_folder = remote_chkpt_folder[1:]       #remote pathing rules will take bucket//checkpoints, need to remove the dup
-                self.oci_handler.save_checkpoint(output_dir, remote_chkpt_folder)    #save local chkpt to remote folder
-                # remove the local 
-                self.temp_folder.cleanup(checkpoint_name=checkpoint_folder)
-            else:
-                # If remote_output_dir is not set, just cleanup temp folder
-                self.temp_folder.cleanup(checkpoint_name=checkpoint_folder)
-
-
         # Maybe delete some older checkpoints.
         if self.args.should_save:
             # Solely rely on numerical checkpoint id for rotation.
@@ -380,7 +357,7 @@ class QwenLVRSFTTrainer(Trainer):
         loss_attn_div = getattr(outputs, 'loss_attn_div', None)
         loss_attn_guidance = getattr(outputs, 'loss_attn_guidance', None)
         loss_attn_transfer = getattr(outputs, 'loss_attn_transfer', None)
-        loss_mode_switch = outputs.loss_mode_switch
+        loss_mode_switch = getattr(outputs, 'loss_mode_switch', None)
 
         # NaN detection and protection for individual loss components
         # Clamp loss values to prevent extreme values that could lead to NaN
@@ -414,18 +391,6 @@ class QwenLVRSFTTrainer(Trainer):
                 # Clamp to prevent extreme values
                 loss_lvr = torch.clamp(loss_lvr, min=0.0, max=MAX_LOSS_VALUE)
         
-        if loss_mode_switch is not None:
-            # Check for NaN or Inf in loss_mode_switch
-            if torch.isnan(loss_mode_switch) or torch.isinf(loss_mode_switch):
-                rank = _rank()
-                print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
-                      f"loss_mode_switch is NaN/Inf: {loss_mode_switch.item()}, replacing with 0.0", flush=True)
-                # Use nan_to_num to preserve computation graph connection
-                loss_mode_switch = torch.nan_to_num(loss_mode_switch, nan=0.0, posinf=0.0, neginf=0.0)
-            else:
-                # Clamp to prevent extreme values
-                loss_mode_switch = torch.clamp(loss_mode_switch, min=0.0, max=MAX_LOSS_VALUE)
-
         if loss_lvr_resampler is not None:
             if torch.isnan(loss_lvr_resampler) or torch.isinf(loss_lvr_resampler):
                 rank = _rank()
@@ -434,8 +399,7 @@ class QwenLVRSFTTrainer(Trainer):
                 print(f"[TRAIN.compute_loss] WARNING | rank={rank} step={self.state.global_step} | "
                       f"loss_lvr_resampler is NaN/Inf: {loss_lvr_resampler.item()}, replacing with 0.0", flush=True)
                 print(f"[TRAIN.compute_loss] rank={rank} loss_ce={loss_ce.item() if loss_ce is not None else 'None'}, "
-                      f"loss_lvr={loss_lvr.item() if loss_lvr is not None else 'None'}, "
-                      f"loss_mode_switch={loss_mode_switch.item() if loss_mode_switch is not None else 'None'}", flush=True)
+                      f"loss_lvr={loss_lvr.item() if loss_lvr is not None else 'None'}", flush=True)
                 loss_lvr_resampler = torch.nan_to_num(loss_lvr_resampler, nan=0.0, posinf=0.0, neginf=0.0)
             else:
                 loss_lvr_resampler = torch.clamp(loss_lvr_resampler, min=0.0, max=MAX_LOSS_VALUE)
@@ -460,33 +424,12 @@ class QwenLVRSFTTrainer(Trainer):
             else:
                 loss_attn_div = torch.clamp(loss_attn_div, min=0.0, max=MAX_LOSS_VALUE)
 
-        # Stage 3 E2E: only CE loss, no auxiliary distillation losses
-        use_stage3_e2e = getattr(self.model.config, 'use_stage3_e2e', False) if hasattr(self.model, 'config') else False
-        if hasattr(self.model, 'module') and hasattr(self.model.module, 'config'):
-            use_stage3_e2e = getattr(self.model.module.config, 'use_stage3_e2e', False)
-        if use_stage3_e2e:
-            loss = loss_ce
-        # Build combined loss based on enabled losses and their weights
-        elif self.args.mode_switch_loss:
-            loss = loss_ce
-            # Add MSE loss if enabled and weight > 0
-            if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
-                loss = loss + self.args.loss_lvr_lambda * loss_lvr
-            # Add BoxFeatureResampler MSE loss if enabled (includes loss_ortho baked in for gradient flow)
-            if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
-                loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
-            # Add mode switch loss if enabled and weight > 0
-            if loss_mode_switch is not None and self.args.loss_mode_switch_lambda > 0:
-                loss = loss + self.args.loss_mode_switch_lambda * loss_mode_switch
-        else:
-            # Start with CE loss
-            loss = loss_ce
-            # Add MSE loss if enabled and weight > 0
-            if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
-                loss = loss + self.args.loss_lvr_lambda * loss_lvr
-            # Add BoxFeatureResampler MSE loss if enabled (includes loss_ortho baked in for gradient flow)
-            if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
-                loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
+        # Build combined loss (two-stage: no mode_switch_loss)
+        loss = loss_ce
+        if self.args.use_mse_loss and loss_lvr is not None and self.args.loss_lvr_lambda > 0:
+            loss = loss + self.args.loss_lvr_lambda * loss_lvr
+        if loss_lvr_resampler is not None and getattr(self.args, 'loss_lvr_resampler_lambda', 0.0) > 0:
+            loss = loss + self.args.loss_lvr_resampler_lambda * loss_lvr_resampler
         # Final NaN check and protection for combined loss
         if torch.isnan(loss) or torch.isinf(loss):
             rank = _rank()
@@ -498,8 +441,7 @@ class QwenLVRSFTTrainer(Trainer):
                   f"loss_lvr={loss_lvr.item() if loss_lvr is not None else 'None'}, "
                   f"loss_lvr_resampler={loss_lvr_resampler.item() if loss_lvr_resampler is not None else 'None'}, "
                   f"loss_ortho={loss_ortho.item() if loss_ortho is not None else 'None'}, "
-                  f"loss_attn_div={loss_attn_div.item() if loss_attn_div is not None else 'None'}, "
-                  f"loss_mode_switch={loss_mode_switch.item() if loss_mode_switch is not None else 'None'}", flush=True)
+                  f"loss_attn_div={loss_attn_div.item() if loss_attn_div is not None else 'None'}", flush=True)
             # Fallback to loss_ce only if combined loss is NaN
             loss = loss_ce if loss_ce is not None else torch.tensor(0.0, device=loss.device, dtype=loss.dtype, requires_grad=True)
         
@@ -521,7 +463,7 @@ class QwenLVRSFTTrainer(Trainer):
                 loss_attn_div_val = 0.0
             loss_attn_guidance_val = loss_attn_guidance.detach().item() if loss_attn_guidance is not None else 0.0
             loss_attn_transfer_val = loss_attn_transfer.detach().item() if loss_attn_transfer is not None else 0.0
-            loss_mode_switch_val = loss_mode_switch.detach().item() if loss_mode_switch is not None else 0.0
+            loss_mode_switch_val = 0.0  # Not used in two-stage pipeline
             
             # Check for NaN before logging
             if torch.isnan(loss) or torch.isnan(torch.tensor(loss_total_val)):
@@ -579,13 +521,6 @@ class QwenLVRSFTTrainer(Trainer):
             except:
                 # Ultimate fallback: use loss_ce or create basic tensor
                 loss = loss_ce if loss_ce is not None else torch.tensor(0.0, device='cuda', dtype=torch.float32, requires_grad=True)
-
-        # Periodic debug: print rank and all loss components so we can see which rank diverges
-        step = self.state.global_step
-        if step is not None and step % 100 == 0 and step > 0:
-            rank = _rank()
-            print(f"[TRAIN.compute_loss] rank={rank} step={step} | loss_total={loss_total_val:.6f} loss_ce={loss_ce_val:.6f} "
-                  f"loss_lvr={loss_lvr_val:.6f} loss_lvr_resampler={loss_lvr_resampler_val:.6f} loss_ortho={loss_ortho_val:.6f} loss_attn_div={loss_attn_div_val:.6f} loss_attn_guidance={loss_attn_guidance_val:.6f} loss_attn_transfer={loss_attn_transfer_val:.6f} loss_mode_switch={loss_mode_switch_val:.6f}", flush=True)
 
         self.log({
             "loss_total": loss_total_val,

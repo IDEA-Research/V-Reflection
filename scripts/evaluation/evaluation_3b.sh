@@ -12,7 +12,7 @@
 # Configuration - Model and GPU Settings
 # ============================================================================
 # Model checkpoint path - Edit this to point to your trained model
-CHECKPOINT_PATH="/comp_robot/zhoujiazhou/projects/Active-Coconut/stage1_checkpoints/checkpoint-2000"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/V-Reflection/result/stage1_3b/bs6_gradAcc8_mseLVR0.1-MaxVisToken5120-MinVisToken128/checkpoint-2500}"
 
 # HuggingFace Mirror Configuration
 # Set HF_ENDPOINT to use HuggingFace mirror (e.g., https://hf-mirror.com)

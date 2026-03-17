@@ -2,22 +2,22 @@
 
 ## 概述
 
-Stage 2 蒸馏在 Stage 1（BoxFeatureResampler 联合训练）的基础上，将 **BoxFeatureResampler 冻结为 Teacher**，新增 **DynamicAutoregressiveResampler 作为 Student**，用 LLM 在 8 个连续 `<lvr>` 位置的 **自回归 Hidden States** 作为动态 Queries，在全图特征上做 Cross-Attention，输出与 Teacher Target 对齐的 latent tokens，通过 MSE 蒸馏。
+Stage 2 蒸馏在 Stage 1（Box-Guided Compression 联合训练）的基础上，将 **Box-Guided Compression 冻结为 Teacher**，新增 **Dynamic Autoregressive Compression 作为 Student**，用 LLM 在 8 个连续 `<lvr>` 位置的 **自回归 Hidden States** 作为动态 Queries，在全图特征上做 Cross-Attention，输出与 Teacher Target 对齐的 latent tokens，通过 MSE 蒸馏。
 
 ## 动机
 
-Stage 1 中，BoxFeatureResampler 使用 **可学习固定 Queries** 对 bbox 区域特征做 Cross-Attention，与 LLM 通过双向对称损失联合训练。推理时，LLM 自回归生成 8 个 `<lvr>` token，其 hidden states 应能表达与 resampler 压缩结果一致的信息。
+Stage 1 中，Box-Guided Compression 使用 **可学习固定 Queries** 对 bbox 区域特征做 Cross-Attention，与 LLM 通过双向对称损失联合训练。推理时，LLM 自回归生成 8 个 `<lvr>` token，其 hidden states 应能表达与 resampler 压缩结果一致的信息。
 
-Stage 2 的目标是：**显式学习从 LLM 自回归 hidden states 到 latent tokens 的映射**，使推理阶段无需再调用 BoxFeatureResampler，仅依赖 LLM 输出 + 轻量 Cross-Attention 即可得到 latent 表示。
+Stage 2 的目标是：**显式学习从 LLM 自回归 hidden states 到 latent tokens 的映射**，使推理阶段无需再调用 Box-Guided Compression，仅依赖 LLM 输出 + 轻量 Cross-Attention 即可得到 latent 表示。
 
 ## 架构
 
 ```
-Teacher (frozen): BoxFeatureResampler
+Teacher (frozen): Box-Guided Compression
     输入: bbox_region_features [B, max_N, D]
     输出: target_latent_tokens [B, 8, D]  (no_grad)
 
-Student (trainable): DynamicAutoregressiveResampler
+Student (trainable): Dynamic Autoregressive Compression
     输入:
       - lvr_hidden_states [B, 8, D_llm]  -- LLM 在 8 个 <lvr> 位置的自回归 hidden states
       - full_image_features [B, Seq_Len, D_vis]  -- 全图特征（非 bbox 裁剪）
@@ -26,7 +26,7 @@ Student (trainable): DynamicAutoregressiveResampler
 Loss: MSE(predicted_latent_tokens, target_latent_tokens.detach())
 ```
 
-### DynamicAutoregressiveResampler 实现细节
+### Dynamic Autoregressive Compression 实现细节
 
 **结构图**：
 
@@ -128,11 +128,11 @@ Teacher 的 Cross-Attention 仅在 bbox 内 token 上计算（形状 `[B, 8, max
 
 | 项目 | Stage 1 | Stage 2 |
 |------|---------|---------|
-| BoxFeatureResampler | 可训练 | 冻结 |
+| Box-Guided Compression | 可训练 | 冻结 |
 | Queries 来源 | 可学习参数 | LLM 自回归 hidden states |
 | K/V 来源 | bbox 区域特征 | 全图特征 |
 | Loss | 双向对称（resampler ↔ LLM） | 单向 MSE + 可选 Pixel-level Attention KL 蒸馏 |
-| 填充 inputs_embeds | resampler 输出 detach | 仍用 Teacher 输出 detach（DiT 50/50 条件） |
+| 填充 inputs_embeds | resampler 输出 detach | Teacher 输出 detach |
 
 ### 5. 总 Loss
 
@@ -167,7 +167,7 @@ loss = loss_ce
 loss = loss_ce + 0.1 * MSE + 0.1 * KL
 ```
 
-**梯度流向**：`target_latent_tokens.detach()`、`teacher_attn` 在 `no_grad` 下，梯度仅回传到 **Student**（DynamicAutoregressiveResampler），Teacher（BoxFeatureResampler）冻结。
+**梯度流向**：`target_latent_tokens.detach()`、`teacher_attn` 在 `no_grad` 下，梯度仅回传到 **Student**（Dynamic Autoregressive Compression），Teacher（Box-Guided Compression）冻结。
 
 ## 配置参数
 
@@ -210,7 +210,7 @@ sbatch scripts/sbatch/sft_7b_stage2_distillation.sh
 ```
 src/
 ├── model/
-│   ├── lvr_heads.py          # DynamicAutoregressiveResampler 类定义
+│   ├── lvr_heads.py          # DynamicAutoregressiveCompression 类定义
 │   └── qwen_lvr_model.py     # _init_dynamic_autoregressive_resampler, 冻结 Teacher
 ├── train/
 │   ├── train_lvr.py          # Stage 2 配置、跳过 resume、configure_lvr_head 中 Student 可训练
@@ -225,10 +225,6 @@ src/
 - 使用 `compute_dtype = hidden_states.dtype` 而非 `next(student_resampler.parameters()).dtype`，因 DeepSpeed ZeRO-3 下参数可能分片，`parameters().dtype` 不可靠
 - `lvr_hidden_states`、`full_image_features` 保持与模型一致（如 bf16），MSE 计算前转为 float32 以提升数值稳定性
 
-### DiT 50/50 条件
-
-- `_resampler_output_for_dit` 仍使用 Teacher 输出，与 Stage 1 一致，保证 DiT 重建头的条件输入稳定
-
 ### 数值稳定性
 
 - 若 `predicted_latent_tokens` 或 `target_latent_tokens` 含 NaN/Inf，则 `loss_lvr_resampler = 0.0`（带 `requires_grad=True` 以保持计算图）
@@ -238,6 +234,6 @@ src/
 
 | 模块 | 关系 |
 |------|------|
-| BoxFeatureResampler | **Teacher**，Stage 2 中冻结 |
+| Box-Guided Compression | **Teacher**，Stage 2 中冻结 |
 | LVR Head | 通常关闭（`LVR_HEAD=False`），仅做蒸馏 |
 | Vision Encoder | 冻结，与 Stage 1 一致 |

@@ -25,15 +25,15 @@ FOLDERS = [
 LATENT_DIMS = [1, 2, 4, 8, 16]
 
 # =============================================================================
-# 自定义折线图数据点 (Custom line chart data points)
-# 若某数据集在 results 下无对应文件夹，或希望覆盖自动读取的值，在此填写
-# 格式: { "数据集名": [y1, y2, y3, y4, y5] }，对应 x=[1, 2, 4, 8, 16]
-# 留空或 None 表示使用自动从 JSON 读取的结果
+# Custom line chart data points
+# Override auto-loaded values when a dataset has no folder under results or when you want explicit values
+# Format: { "dataset_name": [y1, y2, y3, y4, y5] } for x=[1, 2, 4, 8, 16]
+# Use None or omit to auto-load from JSON under results
 # =============================================================================
 CUSTOM_LINE_POINTS = {
-    "BLINK": [15.6, 35.2, 46.4, 54.2, 53.37],       # None = 自动从 blink/decoding_by_steps/box_resampler 读取
-    "MMVP": [24.3, 42.3, 41.3, 70.9, 69.6],        # None = 自动从 MMVP/decoding_by_steps/box_resampler 读取
-    "HRBench-4K": [25.0, 41.4, 45.6, 71.1, 69.9],  # None = 自动读取；若无数据请在此填写，如: [15.0, 35.0, 45.0, 52.0, 51.0]
+    "BLINK": [15.6, 35.2, 46.4, 54.2, 53.37],       # None = auto-load from blink/decoding_by_steps/box_resampler
+    "MMVP": [24.3, 42.3, 41.3, 70.9, 69.6],        # None = auto-load from MMVP/decoding_by_steps/box_resampler
+    "HRBench-4K": [25.0, 41.4, 45.6, 71.1, 69.9],  # None = auto-load; if no data, fill here e.g. [15.0, 35.0, 45.0, 52.0, 51.0]
 }
 
 
@@ -61,7 +61,7 @@ def load_series_from_results(dataset_key: str) -> list[float] | None:
     """Load accuracy series from evaluation results. dataset_key: 'blink', 'MMVP', 'HRBench4K'."""
     base = RESULTS_ROOT / dataset_key / "decoding_by_steps" / "box_resampler"
     if not base.exists() and dataset_key == "HRBench4K":
-        # HRBench4K 可能只有 stage2_distillation，无 box_resampler
+        # HRBench4K may only have stage2_distillation, not box_resampler
         base = RESULTS_ROOT / "HRBench4K" / "decoding_by_steps"
         for sub in base.iterdir():
             if sub.is_dir() and (sub / FOLDERS[0]).exists():
@@ -118,9 +118,9 @@ def main():
     fig, ax = plt.subplots(figsize=(7, 5), facecolor="#fafafa")
     ax.set_facecolor("#ffffff")
 
-    # 只标注 x=8 和 x=16 的准确数字；MMVP 放上面，HRBench-4K 放下面，BLINK 放上面
+    # Annotate accuracy only at x=8 and x=16; MMVP above, HRBench-4K below, BLINK above
     annotate_at_x = {8, 16}
-    # BLINK, MMVP, HRBench-4K: 正=上，负=下
+    # BLINK, MMVP, HRBench-4K: positive=above, negative=below
     y_offsets = {"BLINK": 10, "MMVP": 5, "HRBench-4K": -25}
 
     for i, (legend_name, (xs, ys)) in enumerate(series.items()):

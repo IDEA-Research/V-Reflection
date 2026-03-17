@@ -6,12 +6,17 @@
 #SBATCH --gres=gpu:hgx:1 # A800
 #SBATCH --mem=80G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/evaluation_7b_SFT_%j.txt
+#SBATCH --output=logs/evaluation_7b_SFT_%j.txt
 
 # Support both CHECKPOINT_PATH and EVAL_CHECKPOINT_PATH for compatibility
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-${EVAL_CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/stage1_checkpoints_7b_intrinsic-similarity/Stage1_ISG_steps2100_b1_mseLVR0.1-MaxVisToken5120-MinVisToken128/checkpoint-1500}}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-${EVAL_CHECKPOINT_PATH:-}}"
 # Ensure EVAL_CHECKPOINT_PATH is set (used by evaluation.py)
 export EVAL_CHECKPOINT_PATH="${EVAL_CHECKPOINT_PATH:-$CHECKPOINT_PATH}"
+
+if [ -z "$EVAL_CHECKPOINT_PATH" ]; then
+    echo "Error: CHECKPOINT_PATH or EVAL_CHECKPOINT_PATH must be set to your checkpoint directory."
+    exit 1
+fi
 
 # GPU Settings
 # Can be set via environment variable GPU_ID (e.g., "0,1,2,3,4,5,6,7" for 8 GPUs)
@@ -58,8 +63,16 @@ if command -v conda &> /dev/null; then
 fi
 
 # Setup working directory and Python path
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+# Under sbatch: use SLURM_SUBMIT_DIR; else use parent's PROJECT_ROOT or derive from script
+if [ -n "${SLURM_SUBMIT_DIR}" ]; then
+    PROJECT_ROOT="${SLURM_SUBMIT_DIR}"
+elif [ -n "${PROJECT_ROOT}" ]; then
+    :  # Already set by parent
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+fi
+export PROJECT_ROOT
 cd "$PROJECT_ROOT" || exit 1
 export PYTHONPATH="${PROJECT_ROOT}:${PYTHONPATH:-}"
 

@@ -6,13 +6,14 @@
 #SBATCH --gres=gpu:hgx:8 # A800
 #SBATCH --mem=640G
 #SBATCH --qos=preemptive #specify preemptive Q0S
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/baseline_SFT_7b_b4_ce_steps2500_%j.txt
+#SBATCH --output=logs/baseline_SFT_7b_b4_ce_steps2500_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
 
-
-cd /comp_robot/zhoujiazhou/projects/Active-Coconut
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 export PYTHONPATH="${PWD}:${PWD}/src/train:${PYTHONPATH:-}"
 
 GPU_IDS="${GPU_IDS:-0,1,2,3,4,5,6,7}"
@@ -21,8 +22,8 @@ NUM_DEVICES=$(echo "$GPU_IDS" | tr ',' '\n' | wc -l)
 export PYTORCH_ALLOC_CONF=expandable_segments:True
 
 export WANDB_MODE="${WANDB_MODE:-online}"
-export WANDB_API_KEY=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
-export WANDB_PROJECT="${WANDB_PROJECT:-Dynamic-Coconut}"
+# Set WANDB_API_KEY in your environment or .env for wandb logging (e.g. wandb login)
+export WANDB_PROJECT="${WANDB_PROJECT:-V-Reflection}"
 
 MODEL_NAME="Qwen/Qwen2.5-VL-7B-Instruct"
 DATA_PACKING=True
@@ -39,7 +40,6 @@ DATA_PATH=$([ "$DATASET_CONFIG" = "viscot_full" ] && \
 
 MAX_STEPS=2500
 LR=1e-5
-LVR_HEAD=False
 
 # Loss control
 USE_MSE_LOSS="${USE_MSE_LOSS:-True}"  # Enable MSE/reconstruction loss (default: True for LVR baseline)
@@ -51,9 +51,9 @@ MIN_TOKEN=128
 RUN_NAME="SFT_steps${MAX_STEPS}_b${MAX_INSTANCE_PER_BATCH}_${LVR_LOSS_FCT}LVR${LAMBDA_LVR}_acc${GRAD_ACCUM_STEPS}_MSE${USE_MSE_LOSS}_resample"
 OUTPUT_DIR="result/no_head/${RUN_NAME}/"
 
-# 如果需要从已有 checkpoint 继续训练，请在提交前设置 CHECKPOINT_PATH，例如：
-# CHECKPOINT_PATH="/comp_robot/zhoujiazhou/projects/Active-Coconut/result/no_head/SFT_steps2500_b4_mseLVR0.1_acc8_MSETrue_resample/checkpoint-1800" sbatch scripts/sbatch/sft_7b.sh
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/no_head/SFT_steps2500_b4_mseLVR0.1_acc8_MSETrue_resample/checkpoint-1800}"
+# To resume from an existing checkpoint, set CHECKPOINT_PATH before submitting, e.g.:
+# CHECKPOINT_PATH="result/no_head/SFT_steps2500_b4_mseLVR0.1_acc8_MSETrue_resample/checkpoint-1800" sbatch scripts/sbatch/sft_7b.sh
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
 
 mkdir -p logs "$OUTPUT_DIR"
 MASTER_PORT="${MASTER_PORT:-29500}"
@@ -69,7 +69,6 @@ deepspeed --master_port=$MASTER_PORT src/train/train_lvr.py \
     --model_id $MODEL_NAME \
     --data_path "$DATA_PATH" \
     --remove_unused_columns False \
-    --lvr_head $LVR_HEAD \
     --freeze_vision_tower True \
     --freeze_merger True \
     --freeze_llm False \
@@ -111,7 +110,7 @@ if [ $? -ne 0 ]; then
 fi
 
 echo "Training completed. Starting evaluation..."
-# evaluation_7b_SFT_all_ck.sh discovers all checkpoints under BASE_CHECKPOINT_DIR (not CHECKPOINT_PATH)
+# evaluation_7b_sbatch.sh discovers all checkpoints under BASE_CHECKPOINT_DIR (not CHECKPOINT_PATH)
 BASE_CHECKPOINT_DIR="${PWD}/${OUTPUT_DIR}"
 CHECKPOINT_PATH="${BASE_CHECKPOINT_DIR}/checkpoint-${MAX_STEPS}"
 
@@ -122,7 +121,7 @@ CHECKPOINT_PATH="${BASE_CHECKPOINT_DIR}/checkpoint-${MAX_STEPS}"
 if [ -d "$CHECKPOINT_PATH" ]; then
     export BASE_CHECKPOINT_DIR CHECKPOINT_PATH DATASET_CONFIG
     export EVAL_STEP_LIST="${EVAL_STEP_LIST:-4}"
-    bash "${PWD}/scripts/evaluation/evaluation_7b_SFT_all_ck.sh" || echo "Warning: Evaluation failed"
+    bash "${PWD}/scripts/evaluation/evaluation_7b_sbatch.sh" || echo "Warning: Evaluation failed"
 else
     echo "Warning: No checkpoint found. Skipping evaluation."
 fi

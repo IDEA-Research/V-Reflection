@@ -53,29 +53,16 @@ from transformers.integrations.deepspeed import is_deepspeed_zero3_enabled
 from transformers.integrations.fsdp import is_fsdp_managed_module
 
 
-from src.model.lvr_heads import LVRHead, LVRHeadGLU, LVRHeadAttention, LVRHeadImplicitVisualRouting, LVRHeadGatedFocus, LVRHeadIntrinsicSimilarity, LVRBboxMLP, BoxFeatureResampler, DynamicAutoregressiveResampler
+from src.model.lvr_heads import BoxGuidedCompression, DynamicAutoregressiveCompression
 
 class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, config):
         super().__init__(config)
-        if config.lvr_head:
-            # Get mlp_ratio from config if available, otherwise use default 1.0
-            mlp_ratio = getattr(config, 'mlp_ratio', 1.0)
-            # Get use_flash_attention from config if available, otherwise use default False
-            use_flash_attention = getattr(config, 'use_flash_attention', False)
-            self._init_lvr_head(config.lvr_head_type, mlp_ratio=mlp_ratio, use_flash_attention=use_flash_attention)
-        if config.latent_end_token:
-            self._init_lvr_latent_end_emb()
-        
-        # Initialize bbox MLP if using fixed N LVR tokens
-        if getattr(config, 'use_fixed_num_lvr_tokens', False):
-            fixed_num_lvr_tokens = getattr(config, 'fixed_num_lvr_tokens', 16)
-            self._init_lvr_bbox_mlp(fixed_num_lvr_tokens)
-        # Initialize BoxFeatureResampler for fixed 8 latent MSE target
+        # Initialize Box-Guided Compression for fixed 8 latent MSE target
         if getattr(config, 'use_box_feature_resampler', False):
             num_latent_tokens = getattr(config, 'num_latent_tokens', 8)
             self._init_box_feature_resampler(num_latent_tokens)
-        # Initialize Stage 2: DynamicAutoregressiveResampler (Student) + freeze BoxFeatureResampler (Teacher)
+        # Initialize Stage 2: Dynamic Autoregressive Compression (Student) + freeze Box-Guided Compression (Teacher)
         if getattr(config, 'use_stage2_distillation', False):
             self._init_dynamic_autoregressive_resampler()
     def get_image_features(self, pixel_values, grid_thw):
@@ -99,11 +86,11 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         return hidden_states.split(split_sizes, dim=0)
 
     def _init_box_feature_resampler(self, num_latent_tokens: int = 8):
-        """Initialize BoxFeatureResampler for fixed num_latent_tokens per bbox (target for MSE, output detached).
+        """Initialize Box-Guided Compression for fixed num_latent_tokens per bbox (target for MSE, output detached).
         Bbox features fed to the resampler come from image_embeds (post-merger), so they are already hidden_size;
         use vision_dim=hidden_size so no projection is applied (vision_proj=None)."""
         vision_dim = self.config.hidden_size
-        self.box_feature_resampler = BoxFeatureResampler(
+        self.box_feature_resampler = BoxGuidedCompression(
             hidden_size=self.config.hidden_size,
             num_queries=num_latent_tokens,
             vision_dim=vision_dim,
@@ -111,11 +98,11 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         self.config.num_latent_tokens = num_latent_tokens
 
     def _init_dynamic_autoregressive_resampler(self):
-        """Stage 2: Initialize DynamicAutoregressiveResampler (Student) and freeze BoxFeatureResampler (Teacher)."""
+        """Stage 2: Initialize Dynamic Autoregressive Compression (Student) and freeze Box-Guided Compression (Teacher)."""
         if not hasattr(self, 'box_feature_resampler'):
             raise ValueError("use_stage2_distillation requires use_box_feature_resampler=True")
         num_latent_tokens = getattr(self.config, 'num_latent_tokens', 8)
-        self.student_resampler = DynamicAutoregressiveResampler(
+        self.student_resampler = DynamicAutoregressiveCompression(
             hidden_size=self.config.hidden_size,
             llm_hidden_size=self.config.hidden_size,
             vision_dim=self.config.hidden_size,
@@ -123,122 +110,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         )
         self.box_feature_resampler.requires_grad_(False)
 
-    def _init_lvr_bbox_mlp(self, fixed_num_lvr_tokens: int = 16):
-        """
-        Initialize MLP module to map bbox image token features to N fixed vectors.
-        
-        Args:
-            fixed_num_lvr_tokens: Number of fixed LVR tokens (default: 16)
-        """
-        self.lvr_bbox_mlp = LVRBboxMLP(
-            hidden_size=self.config.hidden_size,
-            fixed_num_lvr_tokens=fixed_num_lvr_tokens
-        )
-        self.config.fixed_num_lvr_tokens = fixed_num_lvr_tokens
-    
-    def _init_lvr_head(self, lvr_head_type, mlp_ratio: float = 1.0, use_flash_attention: bool = False):
-        if lvr_head_type == 'simple':
-            self.lvr_head = LVRHead(hidden_size=self.config.hidden_size)
-        elif lvr_head_type == 'glu':
-            self.lvr_head = LVRHeadGLU(hidden_size=self.config.hidden_size, 
-                                       intermediate_size=self.config.intermediate_size,
-                                       hidden_act=self.config.hidden_act)
-        elif lvr_head_type == 'attention-mask':
-            # Attention-based Head: uses cross-attention mechanism, memory efficient
-            # mlp_ratio controls projection dimension:
-            #   mlp_ratio=1.0: hidden_size -> hidden_size (minimal params, ~25.7M)
-            #   mlp_ratio=0.5: hidden_size -> hidden_size/2 (fewer params, ~25.6M)
-            #   mlp_ratio=0.25: hidden_size -> hidden_size/4 (even fewer params, ~12.8M)
-            self.lvr_head = LVRHeadAttention(
-                hidden_size=self.config.hidden_size,
-                query_dim=None,  # Not used, kept for compatibility
-                num_heads=12,   # Not used, kept for compatibility
-                num_layers=1,   # Not used, kept for compatibility
-                mlp_ratio=mlp_ratio,   # Control projection dimension
-                use_flash_attention=use_flash_attention  # Enable Flash Attention if available
-            )
-        elif lvr_head_type == 'ivr':
-            # Implicit Visual Routing (IVR): Parameter-free routing based on capsule network
-            # Key advantages:
-            #   - Completely parameter-free (except optional output normalization)
-            #   - Most stable training, avoids memory and NCCL overflow issues
-            #   - Achieves 98% of Q-Former performance on ScienceQA
-            # Key parameters:
-            #   iterations: number of routing iterations (default: 3)
-            #   chunk_size: chunk size for long sequences (default: 512)
-            #   use_output_norm: whether to use output normalization (default: True)
-            #   temperature: temperature parameter for routing (default: 1.0)
-            iterations = getattr(self.config, 'ivr_iterations', 3)
-            chunk_size = getattr(self.config, 'ivr_chunk_size', None)  # None means auto-select
-            use_output_norm = getattr(self.config, 'ivr_use_output_norm', True)
-            temperature = getattr(self.config, 'ivr_temperature', 1.0)
-            
-            self.lvr_head = LVRHeadImplicitVisualRouting(
-                hidden_size=self.config.hidden_size,
-                iterations=iterations,
-                chunk_size=chunk_size,
-                use_output_norm=use_output_norm,
-                temperature=temperature
-            )
-        elif lvr_head_type == 'gated-focus' or lvr_head_type == 'gfr':
-            # Gated Feature Reweighting (GFR): Lightweight gated feature reweighting mechanism
-            # Key advantages:
-            #   - Minimal parameters (~4.2M for 7B model)
-            #   - Memory efficient, avoids memory and NCCL overflow issues
-            #   - Suitable as standalone or combined with LVRHeadAttention
-            # Key parameters:
-            #   visual_dim: dimension of visual features (default: hidden_size)
-            #   chunk_size: chunk size for long sequences (default: 512)
-            #   use_output_norm: whether to use output normalization (default: True)
-            visual_dim = getattr(self.config, 'gfr_visual_dim', None)  # None means use hidden_size
-            chunk_size = getattr(self.config, 'gfr_chunk_size', None)  # None means auto-select
-            use_output_norm = getattr(self.config, 'gfr_use_output_norm', True)
-            
-            self.lvr_head = LVRHeadGatedFocus(
-                hidden_size=self.config.hidden_size,
-                visual_dim=visual_dim,
-                use_output_norm=use_output_norm,
-                chunk_size=chunk_size
-            )
-        elif lvr_head_type == 'intrinsic-similarity' or lvr_head_type == 'isg':
-            # Intrinsic Similarity Gating (ISG): Zero-parameter visual routing mechanism
-            # Key advantages:
-            #   - Completely parameter-free (except optional output normalization)
-            #   - Uses intrinsic similarity between LLM hidden states and visual features
-            #   - Excellent numerical stability
-            # Key parameters:
-            #   chunk_size: chunk size for long sequences (default: 512, None means auto-select)
-            #   use_output_norm: whether to use output normalization (default: True)
-            chunk_size = getattr(self.config, 'isg_chunk_size', None)  # None means auto-select
-            use_output_norm = getattr(self.config, 'isg_use_output_norm', True)
-            
-            self.lvr_head = LVRHeadIntrinsicSimilarity(
-                hidden_size=self.config.hidden_size,
-                use_output_norm=use_output_norm,
-                chunk_size=chunk_size
-            )
-        else:
-            # Raise an error for an unknown variant to prevent silent failures
-            raise ValueError(f"Unknown lvr_head_type: '{lvr_head_type}'. "
-                             "Supported variants are 'simple', 'glu', 'attention-mask', 'ivr', 'gated-focus', 'gfr', 'intrinsic-similarity', 'isg'.")
-        self.config.lvr_head_type = lvr_head_type
-        
-    def _init_lvr_latent_end_emb(self):
-        # Initializing the learnable latentend
-        # 2X norm to distinguish this from the normal semantic space
-        target_norm_scale_latentend = 1
-        with torch.no_grad():
-            v = torch.randn(self.config.hidden_size, dtype=self.dtype, device=self.device)
-            v = v / (v.norm() + 1e-6)
-            v = v * (target_norm_scale_latentend * math.sqrt(self.config.hidden_size))
-        self.lvr_latent_end_emb = torch.nn.Parameter(v)
-
-        # lvr_latent_end_emb = torch.full(
-        #     (config.hidden_size,),
-        #     fill_value=1.0 / self.config.hidden_size
-        # )
-        # self.register_buffer('lvr_latent_end_emb', lvr_latent_end_emb)    # will not compute grad
-    
     # Patch the generation function with lvr_generate
     def generate(
         self,
@@ -262,13 +133,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         """
             Patching the generation function for LVR
         """
-        # Reset DiT generation buffers at the start of each new generate() call
-        # This prevents cross-sample buffer pollution in evaluation
-        if hasattr(self, '_dit_lvr_hidden_buffer'):
-            self._dit_lvr_hidden_buffer = {}
-        if hasattr(self, '_dit_lvr_step_counter'):
-            self._dit_lvr_step_counter = {}
-
         # Params in 
         if decoding_strategy is None and hasattr(generation_config,'decoding_strategy'):
             decoding_strategy = generation_config.decoding_strategy
@@ -825,7 +689,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
             else:
                 is_prefill = True
 
-            # print(criterion)
             
             '''set the lvr latent end criterion'''
             if criterion == 'mse':
@@ -964,7 +827,6 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 unfinished_sequences = (
                     lvr_mode_switch | (unfinished_sequences & ~stopping_criteria(input_ids, scores))
                 )
-                # print(lvr_mode_switch)
                 this_peer_finished = unfinished_sequences.max() == 0
                 cur_len += 1
 

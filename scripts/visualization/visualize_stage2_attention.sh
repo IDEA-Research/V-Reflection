@@ -10,19 +10,21 @@
 #SBATCH --gres=gpu:hgx:1
 #SBATCH --mem=80G
 #SBATCH --qos=preemptive
-#SBATCH --output=/comp_robot/zhoujiazhou/projects/Active-Coconut/logs/visualize_stage2_attention_%j.txt
+#SBATCH --output=logs/visualize_stage2_attention_%j.txt
 
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate train
 
-cd /comp_robot/zhoujiazhou/projects/Active-Coconut
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+cd "$PROJECT_ROOT"
 export PYTHONPATH="${PWD}:${PWD}/src/train:${PYTHONPATH:-}"
 export STAGE2_VIS_ATTENTION=1
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-CHECKPOINT_PATH="${CHECKPOINT_PATH:-/comp_robot/zhoujiazhou/projects/Active-Coconut/result/stage2_distillation/SFT_stage2_distillation_steps2500_b4_LVR0.1_resampler0.5_attnTransfer1.0_acc8_latent8_lr1e-6/checkpoint-1500}"
-OUTPUT_DIR_TRAIN="${OUTPUT_DIR_TRAIN:-/comp_robot/zhoujiazhou/projects/Active-Coconut/evaluation/results/stage2_attention_vis_train}"
-OUTPUT_DIR_VAL="${OUTPUT_DIR_VAL:-/comp_robot/zhoujiazhou/projects/Active-Coconut/evaluation/results/stage2_attention_vis_val}"
+CHECKPOINT_PATH="${CHECKPOINT_PATH:-}"
+OUTPUT_DIR_TRAIN="${OUTPUT_DIR_TRAIN:-$PROJECT_ROOT/evaluation/results/stage2_attention_vis_train}"
+OUTPUT_DIR_VAL="${OUTPUT_DIR_VAL:-$PROJECT_ROOT/evaluation/results/stage2_attention_vis_val}"
 
 # Training set mode (default): uniformly sample from meta
 USE_TRAINING_SET="${USE_TRAINING_SET:-0}"

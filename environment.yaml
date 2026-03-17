@@ -1,0 +1,13 @@
+# Conda environment for V-Reflection
+# Usage: conda env create -f environment.yaml && conda activate train
+# Then: pip install qwen-vl-utils && pip install flash-attn --no-build-isolation
+name: train
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - -r requirements.txt
+    - qwen-vl-utils

@@ -1,20 +1,20 @@
-# Active-Coconut 技术报告：模块参数、可学习 Query 与伪代码
+# V-Reflection 技术报告：模块参数、可学习 Query 与伪代码
 
-本文档基于代码实现，详细说明 BCM/DAR 的 Cross-Attention 参数、教师模型可学习 Query 的序列长度，以及核心创新的 PyTorch 风格伪代码。
+本文档基于代码实现，详细说明 BCM/DAC 的 Cross-Attention 参数、教师模型可学习 Query 的序列长度，以及核心创新的 PyTorch 风格伪代码。
 
 ---
 
-## 1. 模块参数：BCM 与 DAR 的 Cross-Attention
+## 1. 模块参数：BCM 与 DAC 的 Cross-Attention
 
 ### 1.1 概述
 
-- **BCM (BoxFeatureResampler)**：Teacher（Stage 1 可训练，Stage 2 冻结），将 bbox 区域视觉特征压缩为固定 latent tokens。
+- **BCM (Box-Guided Compression)**：Teacher（Stage 1 可训练，Stage 2 冻结），将 bbox 区域视觉特征压缩为固定 latent tokens。
 
-- **DAR (DynamicAutoregressiveResampler)**：Student（Stage 2 可训练），用 LLM 自回归 hidden states 作为 Query，在全图特征上做 Cross-Attention，输出与 Teacher Target 对齐的 latent tokens。
+- **DAC (Dynamic Autoregressive Compression)**：Student（Stage 2 可训练），用 LLM 自回归 hidden states 作为 Query，在全图特征上做 Cross-Attention，输出与 Teacher Target 对齐的 latent tokens。
 
 ### 1.2 Cross-Attention 层参数
 
-| 参数 | BCM | DAR |
+| 参数 | BCM | DAC |
 |------|-----|-----|
 | **层数 (Number of Layers)** | 1 | 1 |
 | **注意力头数 (Number of Heads)** | 8 | 8 |
@@ -25,7 +25,7 @@
 
 ```python
 # BCM: num_heads = num_heads or min(8, hidden_size // 64)
-# DAR: num_heads = num_heads or min(8, hidden_size // 64)
+# DAC: num_heads = num_heads or min(8, hidden_size // 64)
 # 对于 Qwen2.5-VL-7B（hidden_size=3584）: num_heads = min(8, 56) = 8
 
 self.cross_attn = nn.MultiheadAttention(
@@ -37,7 +37,7 @@ self.cross_attn = nn.MultiheadAttention(
 ```
 
 - **BCM**：`embed_dim = hidden_size`，`num_heads = min(8, hidden_size // 64)`，单层 Cross-Attention。
-- **DAR**：`embed_dim = hidden_size`，`num_heads = min(8, hidden_size // 64)`，单层 Cross-Attention。
+- **DAC**：`embed_dim = hidden_size`，`num_heads = min(8, hidden_size // 64)`，单层 Cross-Attention。
 - **Qwen2.5-VL-7B**：`hidden_size = 3584`，因此 $D = 3584$，`num_heads = 8`。
 
 ---
@@ -46,7 +46,7 @@ self.cross_attn = nn.MultiheadAttention(
 
 ### 2.1 定义
 
-教师模型（BoxFeatureResampler）使用**静态可学习 Query** $Z_T$ 作为 Cross-Attention 的 Query 输入，对 bbox 区域特征做 Cross-Attention，输出与 LLM 对齐的 latent tokens。
+教师模型（Box-Guided Compression）使用**静态可学习 Query** $Z_T$ 作为 Cross-Attention 的 Query 输入，对 bbox 区域特征做 Cross-Attention，输出与 LLM 对齐的 latent tokens。
 
 ### 2.2 序列长度
 
@@ -72,7 +72,7 @@ self.queries = nn.Parameter(torch.randn(1, num_queries, hidden_size) * 0.02)
 
 ```python
 # Stage 1: Bidirectional Symmetric Loss (src/train/monkey_patch_forward_lvr.py)
-# 对应 docs/BoxFeatureResampler.md 中的设计
+# 对应 docs/BoxGuidedCompression.md 中的设计
 
 def stochastic_decoupled_alignment_loss(
     llm_hidden_states: torch.Tensor,   # [B, 8, D]  LLM 在 8 个 <lvr> 位置的 hidden states
@@ -197,7 +197,7 @@ if last_position_hidden_state is not None and lvr_mode_switch is not None:
 | 项目 | 值 |
 |------|-----|
 | BCM Cross-Attention 层数 | 1 |
-| DAR Cross-Attention 层数 | 1 |
+| DAC Cross-Attention 层数 | 1 |
 | 注意力头数 | 8 |
 | 隐藏层维度 $D$ | 3584（Qwen2.5-VL-7B） |
 | 教师可学习 Query $Z_T$ 序列长度 | 8 |
@@ -286,7 +286,7 @@ Provide a short and direct response.<|im_end|>
 | Token | 作用 |
 |-------|------|
 | `<|lvr_start|>` | 触发连续隐状态推理（LVR 模式入口） |
-| `<|lvr|>` | 8 个 latent 槽位，训练时由 BoxFeatureResampler 输出填充 inputs_embeds |
+| `<|lvr|>` | 8 个 latent 槽位，训练时由 Box-Guided Compression 输出填充 inputs_embeds |
 | `<|lvr_latent_end|>` | 可选，用于 mode switch loss；启用 `latent_end_token` 时插入 |
 | `<|lvr_end|>` | LVR 区间结束 |
 
@@ -304,7 +304,7 @@ processor.tokenizer.add_tokens("<|lvr_end|>", special_tokens=True)
 **边界框不在文本中表示**，而是单独存在 `bboxes` 字段：
 
 - **格式**：`[[x0, y0, x1, y1], ...]`，归一化坐标 (0–1)
-- **用途**：通过 `bbox_to_token_idxs(bboxes, image_grid_thw)` 转为 image token 索引，用于提取 bbox 区域特征并送入 BoxFeatureResampler
+- **用途**：通过 `bbox_to_token_idxs(bboxes, image_grid_thw)` 转为 image token 索引，用于提取 bbox 区域特征并送入 Box-Guided Compression
 
 ### 7.3 实际 Text Prompt 示例
 
