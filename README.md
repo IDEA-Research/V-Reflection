@@ -5,15 +5,15 @@
 [![Page](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](.)
 
 
-Multimodal Large Language Models (MLLMs) have achieved remarkable success, yet they remain prone to perception-related hallucinations in fine-grained tasks. This vulnerability arises from a fundamental limitation: their reasoning is largely restricted to the language domain, treating visual input as a static, reasoning-agnostic preamble rather than a dynamic participant. Consequently, current models act as **passive observers**, unable to re-examine visual details to ground their evolving reasoning states.
-
-To overcome this, we propose **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism. During reasoning, latent states function as dynamic probes that actively interrogate the visual feature space, grounding each reasoning step for task-critical evidence. Our approach employs a two-stage distillation strategy: first, the **Box-Guided Compression (BCM)** module establishes stable pixel-to-latent targets through explicit spatial grounding; next, a **Dynamic Autoregressive Compression (DAC)** module maps the model's hidden states into dynamic probes that interrogate the global visual feature map. By distilling the spatial expertise of the BCM teacher into the DAC student, V-Reflection internalizes the ability to localize task-critical evidence. During inference, both modules remain entirely inactive, maintaining a purely end-to-end autoregressive decoding in the latent space with optimal efficiency. Extensive experiments demonstrate the effectiveness of V-Reflection across six perception-intensive benchmarks, significantly narrowing the fine-grained perception gap. Visualizations confirm that latent reasoning autonomously localizes task-critical visual evidence.
-
 This repository contains the official implementation of **V-Reflection**.
 
 <p align="center">
   <img src="./images/Tesear.png" width="90%">
 </p>
+
+Multimodal Large Language Models (MLLMs) have achieved remarkable success, yet they remain prone to perception-related hallucinations in fine-grained tasks. This vulnerability arises from a fundamental limitation: their reasoning is largely restricted to the language domain, treating visual input as a static, reasoning-agnostic preamble rather than a dynamic participant. Consequently, current models act as **passive observers**, unable to re-examine visual details to ground their evolving reasoning states.
+
+To overcome this, we propose **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism. During reasoning, latent states function as dynamic probes that actively interrogate the visual feature space, grounding each reasoning step for task-critical evidence. 
 
 ## Installation
 
