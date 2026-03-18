@@ -205,7 +205,6 @@ If you find this work helpful for your research, please cite:
 We would like to thank the authors of the following projects for their excellent work:
 
 - [Qwen2.5-VL](https://github.com/QwenLM/Qwen2.5-VL) - MLLM series from Qwen family
-- [Qwen2-VL-Finetune](https://github.com/2U1/Qwen2-VL-Finetune) - Open-source project for finetuning Qwen-2-VL/Qwen-2.5VL models
 - [LVR](https://github.com/VincentLeebang/lvr) - Latent Visual Reasoning model by Vincent Lee
 - [Visual-CoT](https://github.com/deepcs233/Visual-CoT) - Visual CoT dataset
 - [InternVL](https://github.com/OpenGVLab/InternVL) - Open-source MLLM family by Shanghai AI Lab
