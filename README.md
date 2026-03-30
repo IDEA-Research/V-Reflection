@@ -1,14 +1,17 @@
-# V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators
+<p align="center">
+  <img src="./images/Tesear.png" width="100%">
+</p>
+
 
 [![Paper](https://img.shields.io/badge/ArXiv-Paper-brown.svg?logo=arxiv)](.)
-[![Model](https://img.shields.io/badge/Model-HuggingFace-blue.svg?logo=huggingface)](https://huggingface.co/garlandchou/V-Reflection)
+[![Model Weights](https://img.shields.io/badge/Model-HuggingFace-blue.svg?logo=huggingface)](https://huggingface.co/garlandchou/V-Reflection)
 [![Code](https://img.shields.io/badge/Code-GitHub-blue.svg?logo=github)](https://github.com/IDEA-Research/V-Reflection)
 
 
 This repository contains the official implementation of **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism.
 
 <p align="center">
-  <img src="./images/Tesear.png" width="90%">
+  <img src="./images/Tesear.png" width="100%">
 </p>
 
 
