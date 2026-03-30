@@ -10,9 +10,15 @@
 
 This repository contains the official implementation of **V-Reflection**, a framework that transforms the MLLM into an **active interrogator** through a "think-then-look" visual reflection mechanism.
 
+## Method
+
 <p align="center">
-  <img src="./images/Tesear.png" width="100%">
+  <img src="./images/Framework.png" width="90%">
 </p>
+
+- **Stage 1 (BCM):** Box-Guided Compression establishes stable pixel-to-latent targets through explicit spatial grounding, with *Stochastic Decoupled Alignment* — bidirectional symmetric loss to jointly train resampler and LLM.
+- **Stage 2 (DAC):** Dynamic Autoregressive Compression maps the model's hidden states into dynamic probes that interrogate the global visual feature map. Student uses LLM hidden states as Queries, full-image features as K/V, MSE distillation from frozen BCM Teacher.
+- **Inference:** Both BCM and DAC remain entirely inactive. Purely end-to-end autoregressive decoding in the latent space — `last_position_hidden_state` as next-step input embedding for 8-step latent reasoning with optimal efficiency.
 
 
 ## Installation
@@ -164,15 +170,6 @@ We provide checkpoints for V-Reflection. Results on visual perception and high-r
 | HRBench-8K | **66.3**            | 63.8          |
 | MME-Real-Lite | **53.9**         | 45.8          |
 
-## Method
-
-<p align="center">
-  <img src="./images/Framework.png" width="90%">
-</p>
-
-- **Stage 1 (BCM):** Box-Guided Compression establishes stable pixel-to-latent targets through explicit spatial grounding, with *Stochastic Decoupled Alignment* — bidirectional symmetric loss to jointly train resampler and LLM.
-- **Stage 2 (DAC):** Dynamic Autoregressive Compression maps the model's hidden states into dynamic probes that interrogate the global visual feature map. Student uses LLM hidden states as Queries, full-image features as K/V, MSE distillation from frozen BCM Teacher.
-- **Inference:** Both BCM and DAC remain entirely inactive. Purely end-to-end autoregressive decoding in the latent space — `last_position_hidden_state` as next-step input embedding for 8-step latent reasoning with optimal efficiency.
 
 ## Qualitative Results
 
