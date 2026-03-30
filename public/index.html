@@ -3,10 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta
-      name="description"
-      content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators"
-    />
+    <meta name="description" content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators" />
     <title>V-Reflection Project Page</title>
 
     <link rel="stylesheet" href="./styles.css" />
@@ -27,10 +24,10 @@
         <div class="nav-logo">
           <span class="logo-text">V-Reflection</span>
         </div>
-
         <div class="nav-links">
-          <a href="https://huggingface.co/garlandchou/V-Reflection" target="_blank" rel="noreferrer">Model</a>
-          <a href="#tasks">Capabilities</a>
+          <a href="#method">Method</a>
+          <a href="#visualizations">Visualizations</a>
+          <a href="#results">Results</a>
           <a href="#quickstart">Quick Start</a>
           <a href="https://github.com/IDEA-Research/V-Reflection" target="_blank" rel="noreferrer">GitHub</a>
           <a href="https://arxiv.org/abs/2509.24251" target="_blank" rel="noreferrer" class="paper-link">Paper</a>
@@ -38,42 +35,131 @@
       </div>
     </nav>
 
-    <!-- Hero Section -->
+    <!-- ── Hero ─────────────────────────────────────────────────── -->
     <section class="hero">
       <div class="container">
         <div class="hero-layout">
           <div class="hero-content">
+            <div class="hero-badge">ECCV 2026</div>
             <h1 class="hero-title">
-              Transform MLLMs into <span class="em">Active Interrogators</span>.
+              Transform MLLMs into<br><span class="em">Active Interrogators</span>.
             </h1>
             <p class="hero-subtitle">
-              V-Reflection introduces a "think-then-look" visual reflection mechanism that helps MLLMs
-              locate task-critical evidence efficiently in latent space.
+              V-Reflection introduces a "think-then-look" visual reflection mechanism
+              where latent states act as dynamic probes that actively interrogate the
+              visual feature space — grounding each reasoning step for task-critical evidence.
             </p>
-
             <div class="hero-buttons">
               <a href="#quickstart" class="btn btn-primary">Quick Start</a>
-              <a
-                href="https://github.com/IDEA-Research/V-Reflection/blob/main/README.md"
-                class="btn btn-secondary"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Read README
-              </a>
+              <a href="https://arxiv.org/abs/2509.24251" class="btn btn-secondary" target="_blank" rel="noreferrer">Read Paper</a>
+              <a href="https://github.com/IDEA-Research/V-Reflection" class="btn btn-outline" target="_blank" rel="noreferrer">GitHub</a>
             </div>
           </div>
-
           <div class="hero-visual">
             <div class="hero-demo-container">
               <img
                 class="hero-img"
                 src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Tesear.png"
-                alt="V-Reflection qualitative visualization"
+                alt="V-Reflection teaser visualization"
                 loading="lazy"
               />
-              <div class="demo-caption">
-                <p>Qualitative visualization (see README for details)</p>
+              <div class="demo-caption"><p>Latent probes autonomously localize task-critical evidence</p></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Abstract ──────────────────────────────────────────────── -->
+    <section class="abstract-section">
+      <div class="container">
+        <div class="abstract-box">
+          <span class="abstract-label">Abstract</span>
+          <p>
+            MLLMs remain prone to perception-related hallucinations because their reasoning is
+            confined to the language domain, treating visual input as a static, reasoning-agnostic
+            preamble. We propose <strong>V-Reflection</strong>, a framework that transforms the MLLM into an
+            <em>active interrogator</em> through a "think-then-look" visual reflection mechanism.
+            A two-stage distillation strategy synthesizes explicit visual grounding with continuous
+            latent reasoning: the <strong>BCM</strong> establishes stable pixel-to-latent targets;
+            the <strong>DAC</strong> distills this spatial expertise into dynamic latent probes.
+            During inference, both modules remain entirely inactive, maintaining purely end-to-end
+            autoregressive decoding with optimal efficiency.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Method ────────────────────────────────────────────────── -->
+    <section class="method-section" id="method">
+      <div class="container">
+        <h2 class="section-title">How V-Reflection Works</h2>
+        <p class="section-subtitle">A two-stage distillation strategy that bridges explicit spatial grounding with continuous latent reasoning</p>
+
+        <!-- Framework image -->
+        <div class="framework-figure">
+          <img
+            src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Framework.png"
+            alt="V-Reflection framework overview"
+            loading="lazy"
+          />
+          <p class="fig-caption">
+            <strong>Fig. 1 — V-Reflection Architecture.</strong>
+            (a) Stage 1: BCM distills regional patches into grounded latent tokens Z<sub>T</sub> via L<sub>BCM</sub>.
+            (b) Stage 2: DAC trains hidden states H as dynamic probes that interrogate global features.
+            (c) Inference: both modules remain entirely inactive; purely end-to-end latent decoding.
+          </p>
+        </div>
+
+        <!-- Pipeline steps -->
+        <div class="pipeline">
+          <div class="pipeline-step">
+            <div class="step-badge">Stage 1</div>
+            <div class="step-body">
+              <h3>Box-Guided Compression (BCM)</h3>
+              <p>
+                BCM uses RoI-Align to extract local region features from bounding boxes, then
+                compresses them into S grounded latent tokens Z<sub>T</sub> via cross-attention.
+                A <em>Stochastic Decoupled Alignment</em> strategy prevents representation collapse
+                by alternating gradient flow between Z<sub>T</sub> and hidden states H.
+              </p>
+              <div class="step-tags">
+                <span>RoI-Align</span><span>Cross-Attention</span><span>Pixel-to-Latent</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="pipeline-arrow">→</div>
+
+          <div class="pipeline-step">
+            <div class="step-badge">Stage 2</div>
+            <div class="step-body">
+              <h3>Dynamic Autoregressive Compression (DAC)</h3>
+              <p>
+                DAC projects the LLM's S evolving hidden states H into dynamic queries Q<sub>dyn</sub>,
+                which interrogate the global visual feature map F<sub>global</sub>.
+                MSE + KL-divergence distillation from BCM teacher transfers spatial grounding
+                expertise without requiring bounding-box priors at inference.
+              </p>
+              <div class="step-tags">
+                <span>Dynamic Probes</span><span>KL Distillation</span><span>MSE Alignment</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="pipeline-arrow">→</div>
+
+          <div class="pipeline-step pipeline-step--highlight">
+            <div class="step-badge step-badge--green">Inference</div>
+            <div class="step-body">
+              <h3>End-to-End Latent Decoding</h3>
+              <p>
+                Both BCM and DAC remain entirely inactive. The model decodes purely
+                autoregressively in latent space — using <code>last_position_hidden_state</code>
+                as the next-step input embedding for 8 latent reasoning steps with optimal efficiency.
+              </p>
+              <div class="step-tags">
+                <span>No Extra Architecture</span><span>8 Latent Steps</span><span>Zero Overhead</span>
               </div>
             </div>
           </div>
@@ -81,90 +167,86 @@
       </div>
     </section>
 
-    <!-- Key Capabilities -->
-    <section class="capabilities" id="tasks">
+    <!-- ── Visualizations ─────────────────────────────────────────── -->
+    <section class="viz-section" id="visualizations">
       <div class="container">
-        <h2 class="section-title">Key capabilities</h2>
-        <h3 class="section-subtitle">Think-then-look visual reflection for active interrogators</h3>
+        <h2 class="section-title">Visualizations</h2>
+        <p class="section-subtitle">Latent reasoning autonomously localizes task-critical visual evidence — no external tools or bounding box priors</p>
 
-        <div class="capabilities-grid">
-          <div class="capability-card">
-            <div class="capability-content">
-              <h4>Think-then-look reflection</h4>
-              <p>Reformulates visual reasoning as latent reflection, so the model can focus on task-critical evidence.</p>
-            </div>
+        <!-- Viz tabs -->
+        <div class="viz-tabs">
+          <button class="viz-tab active" data-viz="train" type="button">Training Attention</button>
+          <button class="viz-tab" data-viz="infer" type="button">Inference Attention</button>
+          <button class="viz-tab" data-viz="sup" type="button">More Examples</button>
+        </div>
+
+        <!-- Training Attention -->
+        <div class="viz-panel active" id="viz-train">
+          <p class="viz-desc">
+            <strong>Teacher vs. Student attention maps during Stage 2 distillation.</strong>
+            The BCM teacher (top row) produces spatially precise attention over ground-truth regions;
+            the DAC student (bottom row) progressively learns to match this spatial focus using only
+            its own latent states as queries.
+          </p>
+          <div class="viz-img-wrap">
+            <img
+              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Train_Attn.png"
+              alt="Training attention maps — Teacher vs Student"
+              loading="lazy"
+            />
           </div>
-
-          <div class="capability-card">
-            <div class="capability-content">
-              <h4>BCM: Box-Guided Compression</h4>
-              <p>Spatially grounds variable-length visual regions into stable pixel-to-latent targets.</p>
-            </div>
-          </div>
-
-          <div class="capability-card">
-            <div class="capability-content">
-              <h4>DAC: Dynamic Autoregressive Compression</h4>
-              <p>Maps hidden states to dynamic probes that interrogate the global visual feature map.</p>
-            </div>
-          </div>
-
-          <div class="capability-card">
-            <div class="capability-content">
-              <h4>End-to-end latent decoding</h4>
-              <p>Inference stays fully autoregressive in latent space with efficient latent reasoning steps.</p>
-            </div>
-          </div>
-
-          <div class="capability-card">
-            <div class="capability-content">
-              <h4>Distillation-friendly training</h4>
-              <p>Two-stage pipeline (BCM -> DAC) enables stable learning and geometry-aware behavior.</p>
-            </div>
-          </div>
-
-          <div class="capability-card">
-            <div class="capability-content">
-              <h4>Task-critical localization</h4>
-              <p>Latent reasoning autonomously localizes evidence needed to answer the visual question.</p>
-            </div>
+          <div class="viz-img-wrap">
+            <img
+              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Train_Attn_Sup1.png"
+              alt="Training attention supplementary"
+              loading="lazy"
+            />
           </div>
         </div>
-      </div>
-    </section>
 
-    <!-- Performance -->
-    <section class="performance">
-      <div class="container">
-        <div class="performance-content">
-          <div class="performance-text">
-            <h3>Unified architecture for training & inference</h3>
-            <p>
-              Stage 1 (BCM) trains spatial compression. Stage 2 (DAC) learns dynamic probes for latent interrogation.
-              During inference, both BCM and DAC remain inactive and the model decodes end-to-end in latent space.
-            </p>
-
-            <div class="highlights">
-              <div class="highlight-item">
-                <span class="highlight-number">2</span>
-                <span class="highlight-text">Training stages</span>
-              </div>
-              <div class="highlight-item">
-                <span class="highlight-number">8</span>
-                <span class="highlight-text">Latent steps</span>
-              </div>
-              <div class="highlight-item">
-                <span class="highlight-number">End-to-end</span>
-                <span class="highlight-text">Latent decoding</span>
-              </div>
-            </div>
+        <!-- Inference Attention -->
+        <div class="viz-panel" id="viz-infer">
+          <p class="viz-desc">
+            <strong>Latent reasoning visualization at inference.</strong>
+            Dynamic probes interrogate the visual feature space step-by-step.
+            Each latent step progressively sharpens the model's visual focus onto the
+            task-critical region, driving a precise final answer without any external grounding tool.
+          </p>
+          <div class="viz-img-wrap">
+            <img
+              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn.png"
+              alt="Inference attention maps"
+              loading="lazy"
+            />
           </div>
+        </div>
 
-          <div class="performance-visual">
-            <div class="architecture-diagram">
+        <!-- Supplementary -->
+        <div class="viz-panel" id="viz-sup">
+          <p class="viz-desc">
+            <strong>Additional qualitative examples.</strong>
+            Across diverse visual question types, the model's latent probes consistently
+            home in on the semantically relevant region required to resolve the query.
+          </p>
+          <div class="viz-grid">
+            <div class="viz-img-wrap">
               <img
-                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Framework.png"
-                alt="Framework overview"
+                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup1.png"
+                alt="Supplementary inference attention 1"
+                loading="lazy"
+              />
+            </div>
+            <div class="viz-img-wrap">
+              <img
+                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup2.png"
+                alt="Supplementary inference attention 2"
+                loading="lazy"
+              />
+            </div>
+            <div class="viz-img-wrap">
+              <img
+                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup3.png"
+                alt="Supplementary inference attention 3"
                 loading="lazy"
               />
             </div>
@@ -173,7 +255,72 @@
       </div>
     </section>
 
-    <!-- Quick Start -->
+    <!-- ── Results ────────────────────────────────────────────────── -->
+    <section class="results-section" id="results">
+      <div class="container">
+        <h2 class="section-title">Benchmark Results</h2>
+        <p class="section-subtitle">V-Reflection consistently outperforms the Qwen2.5-VL-7B baseline across all six perception-intensive benchmarks</p>
+
+        <div class="results-table-wrap">
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>Benchmark</th>
+                <th>Qwen2.5-VL-7B</th>
+                <th class="col-ours">V-Reflection (ours)</th>
+                <th class="col-gain">Gain</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>MMVP</td>
+                <td>66.7</td>
+                <td class="col-ours"><strong>72.3</strong></td>
+                <td class="col-gain">+5.6</td>
+              </tr>
+              <tr>
+                <td>BLINK</td>
+                <td>54.5</td>
+                <td class="col-ours"><strong>56.4</strong></td>
+                <td class="col-gain">+1.9</td>
+              </tr>
+              <tr>
+                <td>V* Bench</td>
+                <td>78.5</td>
+                <td class="col-ours"><strong>81.7</strong></td>
+                <td class="col-gain">+3.2</td>
+              </tr>
+              <tr>
+                <td>HRBench-4K</td>
+                <td>68.0</td>
+                <td class="col-ours"><strong>72.6</strong></td>
+                <td class="col-gain">+4.6</td>
+              </tr>
+              <tr>
+                <td>HRBench-8K</td>
+                <td>63.8</td>
+                <td class="col-ours"><strong>66.3</strong></td>
+                <td class="col-gain">+2.5</td>
+              </tr>
+              <tr>
+                <td>MME-RealWorld-Lite</td>
+                <td>45.8</td>
+                <td class="col-ours"><strong>53.9</strong></td>
+                <td class="col-gain">+8.1</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="results-note">
+          Download model weights on
+          <a href="https://huggingface.co/garlandchou/V-Reflection" target="_blank" rel="noreferrer">HuggingFace</a>
+          and reproduce all results with the provided evaluation scripts.
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Quick Start ────────────────────────────────────────────── -->
     <section class="quickstart" id="quickstart">
       <div class="container">
         <h2 class="section-title">Quick Start</h2>
@@ -183,8 +330,9 @@
           <div class="code-tabs">
             <button class="code-tab active" data-tab="install" type="button">Installation</button>
             <button class="code-tab" data-tab="train-stage1" type="button">Train Stage 1</button>
+            <button class="code-tab" data-tab="train-stage2" type="button">Train Stage 2</button>
+            <button class="code-tab" data-tab="eval" type="button">Evaluation</button>
           </div>
-
           <div class="code-content">
             <div class="code-block active" id="install">
               <pre><code>conda env create -f environment.yaml
@@ -192,83 +340,33 @@ conda activate train
 pip install qwen-vl-utils
 pip install flash-attn --no-build-isolation</code></pre>
             </div>
-
             <div class="code-block" id="train-stage1">
-              <pre><code>bash scripts_release/train/sft_7b_stage1_box_resampler.sh
-# If your setup requires custom args, edit the script and set:
-# --data_path / --image_folder</code></pre>
+              <pre><code># Stage 1: Box-Guided Compression (BCM)
+bash scripts_release/train/sft_7b_stage1_box_resampler.sh
+# Set --data_path and --image_folder in the script if needed</code></pre>
+            </div>
+            <div class="code-block" id="train-stage2">
+              <pre><code># Stage 2: Dynamic Autoregressive Compression (DAC)
+export CHECKPOINT_PATH="path/to/stage1_checkpoint"
+bash scripts_release/train/sft_7b_stage2_distillation.sh</code></pre>
+            </div>
+            <div class="code-block" id="eval">
+              <pre><code># Full benchmark evaluation (BLINK, MMVP, VSTAR, HRBench4K/8K, MME-RealWorld-Lite)
+export EVAL_CHECKPOINT_PATH="path/to/checkpoint"
+bash scripts_release/evaluation/evaluation_7b_stage2.sh</code></pre>
             </div>
           </div>
         </div>
 
         <div class="quickstart-links">
-          <a
-            href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/train"
-            class="link-button"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Training Scripts
-          </a>
-          <a
-            href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/evaluation"
-            class="link-button"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Evaluation Scripts
-          </a>
+          <a href="https://huggingface.co/garlandchou/V-Reflection" class="link-button" target="_blank" rel="noreferrer">Download Model</a>
+          <a href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/train" class="link-button" target="_blank" rel="noreferrer">Training Scripts</a>
+          <a href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/evaluation" class="link-button" target="_blank" rel="noreferrer">Evaluation Scripts</a>
         </div>
       </div>
     </section>
 
-    <!-- Open innovation -->
-    <section class="opensource">
-      <div class="container">
-        <h2 class="section-title">Open innovation</h2>
-        <p class="section-subtitle">We publicly release the full implementation, training recipe, and reproducible scripts.</p>
-
-        <div class="opensource-grid">
-          <div class="opensource-item">
-            <div class="opensource-icon">Research</div>
-            <h4>Research</h4>
-            <p>Method overview, training pipeline, and benchmark results.</p>
-          </div>
-
-          <div class="opensource-item">
-            <div class="opensource-icon">Code</div>
-            <h4>Code</h4>
-            <p>Official implementation and easy-to-read scripts.</p>
-          </div>
-
-          <div class="opensource-item">
-            <div class="opensource-icon">Demo</div>
-            <h4>Qualitative Results</h4>
-            <p>Visualizations and attention maps for latent reasoning.</p>
-          </div>
-
-          <div class="opensource-item">
-            <div class="opensource-icon">Tutorials</div>
-            <h4>Tutorials</h4>
-            <p>Step-by-step guidance in the README and scripts.</p>
-          </div>
-        </div>
-
-        <div class="opensource-buttons">
-          <a
-            href="https://huggingface.co/garlandchou/V-Reflection"
-            class="btn btn-primary"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Download Model
-          </a>
-          <a href="https://arxiv.org/abs/2509.24251" class="btn btn-secondary" target="_blank" rel="noreferrer">Read Paper</a>
-        </div>
-      </div>
-    </section>
-
-    <!-- Footer -->
+    <!-- ── Footer ────────────────────────────────────────────────── -->
     <footer class="footer">
       <div class="container">
         <div class="footer-content">
@@ -278,7 +376,6 @@ pip install flash-attn --no-build-isolation</code></pre>
             </div>
             <p>Transforming MLLMs from passive observers to active interrogators.</p>
           </div>
-
           <div class="footer-links">
             <div class="footer-section">
               <h4>Resources</h4>
@@ -286,21 +383,18 @@ pip install flash-attn --no-build-isolation</code></pre>
               <a href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/train" target="_blank" rel="noreferrer">Training</a>
               <a href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/evaluation" target="_blank" rel="noreferrer">Evaluation</a>
             </div>
-
             <div class="footer-section">
               <h4>Community</h4>
               <a href="https://github.com/IDEA-Research/V-Reflection" target="_blank" rel="noreferrer">GitHub</a>
               <a href="https://github.com/IDEA-Research/V-Reflection/issues" target="_blank" rel="noreferrer">Issues</a>
             </div>
-
             <div class="footer-section">
               <h4>Research</h4>
               <a href="https://huggingface.co/garlandchou/V-Reflection" target="_blank" rel="noreferrer">Model Weights</a>
-              <a href="https://arxiv.org/abs/2509.24251" target="_blank" rel="noreferrer">Paper</a>
+              <a href="https://arxiv.org/abs/2509.24251" target="_blank" rel="noreferrer">Paper (ECCV 2026)</a>
             </div>
           </div>
         </div>
-
         <div class="footer-bottom">
           <p>&copy; <span id="year">2026</span> IDEA-Research. All rights reserved.</p>
         </div>
@@ -308,24 +402,29 @@ pip install flash-attn --no-build-isolation</code></pre>
     </footer>
 
     <script>
-      // Simple code-tab switcher (Installation / Train Stage 1).
       (function () {
-        const tabs = Array.from(document.querySelectorAll(".code-tab"));
-        const blocks = Array.from(document.querySelectorAll(".code-block"));
-
-        function setActive(tab) {
-          tabs.forEach((t) => t.classList.toggle("active", t === tab));
+        /* ── code tab switcher ── */
+        const ctabs = Array.from(document.querySelectorAll(".code-tab"));
+        const cblocks = Array.from(document.querySelectorAll(".code-block"));
+        function setCodeTab(tab) {
+          ctabs.forEach((t) => t.classList.toggle("active", t === tab));
           const id = tab.getAttribute("data-tab");
-          blocks.forEach((b) => b.classList.toggle("active", b.id === id));
+          cblocks.forEach((b) => b.classList.toggle("active", b.id === id));
         }
+        ctabs.forEach((t) => t.addEventListener("click", () => setCodeTab(t)));
 
-        tabs.forEach((tab) => {
-          tab.addEventListener("click", () => setActive(tab));
-        });
+        /* ── viz tab switcher ── */
+        const vtabs = Array.from(document.querySelectorAll(".viz-tab"));
+        const vpanels = Array.from(document.querySelectorAll(".viz-panel"));
+        function setVizTab(tab) {
+          vtabs.forEach((t) => t.classList.toggle("active", t === tab));
+          const key = tab.getAttribute("data-viz");
+          vpanels.forEach((p) => p.classList.toggle("active", p.id === "viz-" + key));
+        }
+        vtabs.forEach((t) => t.addEventListener("click", () => setVizTab(t)));
+
+        document.getElementById("year").textContent = new Date().getFullYear();
       })();
-
-      document.getElementById("year").textContent = new Date().getFullYear();
     </script>
   </body>
 </html>
-
