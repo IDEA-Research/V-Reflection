@@ -5,7 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators" />
     <title>V-Reflection Project Page</title>
-    <link rel="icon" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" type="image/png" />
+    <!-- Favicon: multiple hints help browsers pick a sharper downscale (tab icon size is still capped by the browser). -->
+    <link rel="icon" type="image/png" sizes="32x32" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
+    <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
+    <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" sizes="180x180" />
 
     <link rel="stylesheet" href="./styles.css" />
 
@@ -42,9 +46,20 @@
       <div class="container">
         <div class="hero-layout">
           <div class="hero-content">
-            <h1 class="hero-title">
-              Transform MLLMs into<br><span class="em">Active Interrogators</span>.
-            </h1>
+            <div class="hero-title-row">
+              <img
+                class="hero-title-logo"
+                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png"
+                alt=""
+                width="72"
+                height="72"
+                decoding="async"
+                fetchpriority="high"
+              />
+              <h1 class="hero-title">
+                Transform MLLMs into<br /><span class="em">Active Interrogators</span>.
+              </h1>
+            </div>
             <p class="hero-subtitle">
               V-Reflection introduces a "think-then-look" visual reflection mechanism
               where latent states act as dynamic probes that actively interrogate the
