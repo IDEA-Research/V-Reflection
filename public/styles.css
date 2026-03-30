@@ -251,6 +251,10 @@ body {
   box-sizing: border-box;
 }
 
+html {
+  scroll-padding-top: 86px;
+}
+
 body {
   font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   line-height: 1.6;
@@ -380,9 +384,9 @@ body {
 .hero-layout {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 80px;
+  gap: 48px;
   align-items: center;
-  min-height: 600px;
+  min-height: auto;
 }
 
 .hero-content {
@@ -439,8 +443,9 @@ body {
 .hero-demo-container {
   position: relative;
   width: 100%;
-  max-width: 600px;
-  transform: translateY(40px);
+  max-width: min(100%, 460px);
+  margin: 0 auto;
+  transform: translateY(12px);
   z-index: 1;
 }
 
@@ -472,9 +477,14 @@ body {
 
 .hero-img {
   width: 100%;
+  max-width: 100%;
+  max-height: min(46vh, 400px);
   height: auto;
+  object-fit: contain;
+  object-position: center;
   border-radius: 14px;
   display: block;
+  margin-inline: auto;
   box-shadow: 0 10px 40px rgba(15, 23, 42, 0.12);
   border: 1px solid rgba(15, 23, 42, 0.06);
 }
@@ -870,9 +880,13 @@ body {
   }
 
   .hero-demo-container {
-    transform: translateY(20px);
-    max-width: 460px;
+    transform: translateY(8px);
+    max-width: min(100%, 420px);
     margin: 0 auto;
+  }
+
+  .hero-img {
+    max-height: min(38vh, 360px);
   }
 
   .nav-links {
@@ -950,21 +964,6 @@ body {
    NEW SECTIONS  (Abstract · Method · Visualizations · Results)
 ═══════════════════════════════════════════════════════════ */
 
-/* ── Hero extras ── */
-.hero-badge {
-  display: inline-block;
-  background: linear-gradient(135deg, rgba(102, 126, 234, 0.15), rgba(99, 102, 241, 0.15));
-  border: 1px solid rgba(102, 126, 234, 0.35);
-  color: #4f46e5;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 4px 12px;
-  border-radius: 999px;
-  margin-bottom: 18px;
-}
-
 .btn-outline {
   background: transparent;
   color: #334155;
@@ -1026,8 +1025,12 @@ body {
   text-align: center;
 }
 .framework-figure img {
-  width: 100%;
-  max-width: 960px;
+  width: auto;
+  max-width: min(100%, 920px);
+  max-height: min(56vh, 520px);
+  height: auto;
+  object-fit: contain;
+  object-position: center;
   border-radius: 14px;
   border: 1px solid rgba(15,23,42,0.07);
   box-shadow: 0 10px 40px rgba(0,0,0,0.08);
@@ -1175,24 +1178,36 @@ body {
   border-radius: 16px;
   border: 1px solid rgba(15,23,42,0.07);
   box-shadow: 0 6px 28px rgba(0,0,0,0.07);
-  padding: 16px;
-  margin-bottom: 28px;
-  overflow: hidden;
+  padding: 12px;
+  margin-bottom: 24px;
+  overflow: auto;
+  max-height: min(88vh, 880px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 .viz-img-wrap img {
-  width: 100%;
+  width: auto;
+  max-width: 100%;
+  max-height: min(78vh, 760px);
   height: auto;
+  object-fit: contain;
+  object-position: center;
   border-radius: 10px;
   display: block;
 }
 
 .viz-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 24px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
 }
 .viz-grid .viz-img-wrap {
   margin-bottom: 0;
+  max-height: min(72vh, 560px);
+}
+.viz-grid .viz-img-wrap img {
+  max-height: min(64vh, 500px);
 }
 
 /* ── Results ── */
