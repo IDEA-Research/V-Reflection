@@ -5,11 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators" />
     <title>V-Reflection Project Page</title>
-    <!-- Favicon: multiple hints help browsers pick a sharper downscale (tab icon size is still capped by the browser). -->
-    <link rel="icon" type="image/png" sizes="32x32" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
-    <link rel="icon" type="image/png" sizes="48x48" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
-    <link rel="icon" type="image/png" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
-    <link rel="apple-touch-icon" href="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" sizes="180x180" />
 
     <link rel="stylesheet" href="./styles.css" />
 
@@ -182,29 +177,12 @@
 
         <!-- Viz tabs -->
         <div class="viz-tabs">
-          <button class="viz-tab active" data-viz="train" type="button">Training Attention</button>
-          <button class="viz-tab" data-viz="infer" type="button">Inference Attention</button>
-        </div>
-
-        <!-- Training Attention -->
-        <div class="viz-panel active" id="viz-train">
-          <p class="viz-desc">
-            <strong>Teacher vs. Student attention maps during Stage 2 distillation.</strong>
-            The BCM teacher (top row) produces spatially precise attention over ground-truth regions;
-            the DAC student (bottom row) progressively learns to match this spatial focus using only
-            its own latent states as queries.
-          </p>
-          <div class="viz-img-wrap">
-            <img
-              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Train_Attn_Sup1.png"
-              alt="Training attention maps — Teacher vs Student"
-              loading="lazy"
-            />
-          </div>
+          <button class="viz-tab active" data-viz="infer" type="button">Inference Attention</button>
+          <button class="viz-tab" data-viz="train" type="button">Training Attention</button>
         </div>
 
         <!-- Inference Attention -->
-        <div class="viz-panel" id="viz-infer">
+        <div class="viz-panel active" id="viz-infer">
           <p class="viz-desc">
             <strong>Latent reasoning visualization at inference.</strong>
             Dynamic probes interrogate the visual feature space step-by-step.
@@ -236,6 +214,23 @@
               <span class="carousel-dot" data-idx="2"></span>
               <span class="carousel-dot" data-idx="3"></span>
             </div>
+          </div>
+        </div>
+
+        <!-- Training Attention -->
+        <div class="viz-panel" id="viz-train">
+          <p class="viz-desc">
+            <strong>Teacher vs. Student attention maps during Stage 2 distillation.</strong>
+            The BCM teacher (top row) produces spatially precise attention over ground-truth regions;
+            the DAC student (bottom row) progressively learns to match this spatial focus using only
+            its own latent states as queries.
+          </p>
+          <div class="viz-img-wrap">
+            <img
+              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Train_Attn_Sup1.png"
+              alt="Training attention maps — Teacher vs Student"
+              loading="lazy"
+            />
           </div>
         </div>
 
@@ -400,48 +395,53 @@ bash scripts_release/evaluation/evaluation_7b_stage2.sh</code></pre>
         }
         ctabs.forEach((t) => t.addEventListener("click", () => setCodeTab(t)));
 
-        /* ── viz tab switcher ── */
-        const vtabs = Array.from(document.querySelectorAll(".viz-tab"));
-        const vpanels = Array.from(document.querySelectorAll(".viz-panel"));
-        function setVizTab(tab) {
-          vtabs.forEach((t) => t.classList.toggle("active", t === tab));
-          const key = tab.getAttribute("data-viz");
-          vpanels.forEach((p) => p.classList.toggle("active", p.id === "viz-" + key));
-        }
-        vtabs.forEach((t) => t.addEventListener("click", () => setVizTab(t)));
-
         /* ── inference carousel ── */
+        var inferCarouselSync = null;   // exposed so viz-tab can call it
         (function () {
           const carousel = document.getElementById("infer-carousel");
           if (!carousel) return;
-          const wrap = carousel.querySelector(".carousel-track-wrap");
+          const wrap  = carousel.querySelector(".carousel-track-wrap");
           const track = carousel.querySelector(".carousel-track");
           const slides = Array.from(carousel.querySelectorAll(".carousel-slide"));
-          const dots = Array.from(carousel.querySelectorAll(".carousel-dot"));
+          const dots   = Array.from(carousel.querySelectorAll(".carousel-dot"));
           let cur = 0;
+
+          function setWrapHeight() {
+            /* slides[cur] height is only measurable when the panel is visible */
+            const h = slides[cur].getBoundingClientRect().height;
+            if (h > 0) { wrap.style.height = h + "px"; return; }
+            /* fallback: derive from image natural ratio × rendered width */
+            const img = slides[cur].querySelector("img");
+            if (img && img.naturalWidth) {
+              wrap.style.height = (img.naturalHeight / img.naturalWidth * wrap.offsetWidth) + "px";
+            }
+          }
 
           function syncHeight() {
             const img = slides[cur].querySelector("img");
             if (img && img.complete && img.naturalHeight) {
-              wrap.style.height = slides[cur].offsetHeight + "px";
+              setWrapHeight();
             } else if (img) {
-              img.addEventListener("load", function () {
-                wrap.style.height = slides[cur].offsetHeight + "px";
-              }, { once: true });
+              img.addEventListener("load", setWrapHeight, { once: true });
             }
           }
+          inferCarouselSync = syncHeight;   // share with tab switcher
 
           function goTo(idx) {
             cur = (idx + slides.length) % slides.length;
             track.style.transform = "translateX(-" + (cur * 100) + "%)";
             dots.forEach((d, i) => d.classList.toggle("active", i === cur));
-            setTimeout(syncHeight, 50);
+            setTimeout(syncHeight, 30);
           }
 
-          /* init height after all images in slide 0 load */
-          window.addEventListener("load", function () {
-            wrap.style.height = slides[0].offsetHeight + "px";
-          });
+          /* init: listen for all images then sync */
+          const firstImg = slides[0].querySelector("img");
+          if (firstImg && firstImg.complete) {
+            syncHeight();
+          } else if (firstImg) {
+            firstImg.addEventListener("load", syncHeight, { once: true });
+          }
+          window.addEventListener("resize", syncHeight);
 
           carousel.querySelector(".carousel-prev").addEventListener("click", () => goTo(cur - 1));
           carousel.querySelector(".carousel-next").addEventListener("click", () => goTo(cur + 1));
@@ -450,10 +450,22 @@ bash scripts_release/evaluation/evaluation_7b_stage2.sh</code></pre>
           document.addEventListener("keydown", function (e) {
             const inferPanel = document.getElementById("viz-infer");
             if (!inferPanel || !inferPanel.classList.contains("active")) return;
-            if (e.key === "ArrowLeft") goTo(cur - 1);
+            if (e.key === "ArrowLeft")  goTo(cur - 1);
             if (e.key === "ArrowRight") goTo(cur + 1);
           });
         })();
+
+        /* ── viz tab switcher ── */
+        const vtabs = Array.from(document.querySelectorAll(".viz-tab"));
+        const vpanels = Array.from(document.querySelectorAll(".viz-panel"));
+        function setVizTab(tab) {
+          vtabs.forEach((t) => t.classList.toggle("active", t === tab));
+          const key = tab.getAttribute("data-viz");
+          vpanels.forEach((p) => p.classList.toggle("active", p.id === "viz-" + key));
+          /* when switching to inference tab, re-sync carousel height */
+          if (key === "infer" && inferCarouselSync) setTimeout(inferCarouselSync, 30);
+        }
+        vtabs.forEach((t) => t.addEventListener("click", () => setVizTab(t)));
 
         document.getElementById("year").textContent = new Date().getFullYear();
       })();
