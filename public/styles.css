@@ -1193,7 +1193,7 @@ body {
   width: 100%;
   max-width: 100%;
   max-height: none;
-  height: min(78vh, 760px);
+  height: min(92vh, 980px);
   object-fit: cover;
   object-position: center;
   border-radius: 16px;
@@ -1202,7 +1202,7 @@ body {
 
 @media (max-width: 600px) {
   .viz-img-wrap img {
-    height: min(52vh, 420px);
+    height: min(62vh, 520px);
   }
 }
 
