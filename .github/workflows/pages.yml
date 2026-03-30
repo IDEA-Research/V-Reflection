@@ -26,6 +26,10 @@ jobs:
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
+        with:
+          # On first deployment, the repository Pages "site" may not exist yet.
+          # enablement=true lets the action try to create/enable it.
+          enablement: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
