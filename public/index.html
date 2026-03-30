@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators" />
+    <title>V-Reflection Project Page</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <meta property="og:title" content="V-Reflection" />
+    <meta property="og:description" content="Think-then-look visual reflection for active interrogators." />
+    <meta property="og:type" content="website" />
+  </head>
+  <body>
+    <div class="bg" aria-hidden="true"></div>
+
+    <header class="wrap header">
+      <div class="brand">
+        <div class="logo">V-Reflection</div>
+        <div class="tag">Think-then-look visual reflection</div>
+      </div>
+
+      <nav class="nav" aria-label="Primary">
+        <a class="btn" href="https://huggingface.co/garlandchou/V-Reflection" target="_blank" rel="noreferrer">Model</a>
+        <a class="btn" href="https://github.com/IDEA-Research/V-Reflection" target="_blank" rel="noreferrer">Code</a>
+        <a class="btn" href="https://arxiv.org/abs/2509.24251" target="_blank" rel="noreferrer">Paper</a>
+      </nav>
+    </header>
+
+    <main class="wrap">
+      <section class="hero">
+        <div class="hero-copy">
+          <h1>Transform MLLMs into <span class="em">Active Interrogators</span>.</h1>
+          <p class="lead">
+            V-Reflection introduces a “think-then-look” visual reflection mechanism to help MLLMs
+            locate task-critical evidence in the image—efficiently in latent space.
+          </p>
+
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="https://github.com/IDEA-Research/V-Reflection/blob/main/README.md" target="_blank" rel="noreferrer">
+              Quick Start (README)
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/train" target="_blank" rel="noreferrer">
+              Training Scripts
+            </a>
+            <a class="btn btn-ghost" href="https://github.com/IDEA-Research/V-Reflection/tree/main/scripts_release/evaluation" target="_blank" rel="noreferrer">
+              Evaluation Scripts
+            </a>
+          </div>
+
+          <div class="facts">
+            <div class="fact">
+              <div class="k">Stage 1</div>
+              <div class="v">Box-Guided Compression (BCM)</div>
+            </div>
+            <div class="fact">
+              <div class="k">Stage 2</div>
+              <div class="v">Dynamic Autoregressive Compression (DAC)</div>
+            </div>
+            <div class="fact">
+              <div class="k">Inference</div>
+              <div class="v">End-to-end latent decoding</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hero-figure">
+          <img
+            class="hero-img"
+            src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Tesear.png"
+            alt="V-Reflection qualitative example"
+            loading="lazy"
+          />
+          <div class="caption">Qualitative visualization (see README for details)</div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>What you get</h2>
+          <ul class="list">
+            <li>Latent reasoning that autonomously localizes evidence.</li>
+            <li>Two-stage training: BCM → DAC distillation.</li>
+            <li>Inference remains fully autoregressive in latent space.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h2>How to cite</h2>
+          <p class="muted">Use the citation from the repository README.</p>
+          <a class="btn btn-small" href="https://github.com/IDEA-Research/V-Reflection/blob/main/README.md#citation" target="_blank" rel="noreferrer">
+            Open citation section
+          </a>
+        </article>
+
+        <article class="card">
+          <h2>License</h2>
+          <p class="muted">Apache-2.0. See <a href="https://github.com/IDEA-Research/V-Reflection/blob/main/LICENSE" target="_blank" rel="noreferrer">LICENSE</a>.</p>
+        </article>
+      </section>
+    </main>
+
+    <footer class="wrap footer">
+      <span class="muted">© <span id="year">2026</span> IDEA-Research</span>
+      <span class="muted">Deployed via GitHub Actions • GitHub Pages</span>
+    </footer>
+
+    <script>
+      // Keep the page self-contained and robust.
+      document.getElementById("year").textContent = new Date().getFullYear();
+    </script>
+  </body>
+</html>
+
