@@ -298,10 +298,11 @@ body {
 }
 
 .nav-logo-img {
-  height: 32px;
+  height: 42px;
   width: auto;
-  border-radius: 6px;
+  border-radius: 8px;
   display: block;
+  object-fit: contain;
 }
 
 .logo-text {
@@ -1193,7 +1194,7 @@ body {
   width: 100%;
   max-width: 100%;
   max-height: none;
-  height: min(92vh, 980px);
+  height: min(105vh, 1180px);
   object-fit: cover;
   object-position: center;
   border-radius: 16px;
@@ -1202,7 +1203,7 @@ body {
 
 @media (max-width: 600px) {
   .viz-img-wrap img {
-    height: min(62vh, 520px);
+    height: min(72vh, 640px);
   }
 }
 
