@@ -297,6 +297,14 @@ body {
   gap: 12px;
 }
 
+.nav-logo-img {
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+  display: block;
+  border-radius: 8px;
+}
+
 .logo-text {
   font-size: 22px;
   font-weight: 750;
@@ -383,8 +391,8 @@ body {
 
 .hero-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 48px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 40px 56px;
   align-items: center;
   min-height: auto;
 }
@@ -443,7 +451,7 @@ body {
 .hero-demo-container {
   position: relative;
   width: 100%;
-  max-width: min(100%, 460px);
+  max-width: min(100%, 680px);
   margin: 0 auto;
   transform: translateY(12px);
   z-index: 1;
@@ -478,7 +486,7 @@ body {
 .hero-img {
   width: 100%;
   max-width: 100%;
-  max-height: min(46vh, 400px);
+  max-height: min(72vh, 640px);
   height: auto;
   object-fit: contain;
   object-position: center;
@@ -504,6 +512,35 @@ body {
   display: inline-block;
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
   backdrop-filter: blur(10px);
+}
+
+.demo-caption--long {
+  text-align: left;
+  margin-top: 22px;
+  max-width: 100%;
+}
+
+.demo-caption--long p {
+  font-size: 0.92rem;
+  font-weight: 400;
+  line-height: 1.7;
+  color: #475569;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 18px 20px;
+  border-radius: 14px;
+  display: block;
+  box-shadow: 0 6px 24px rgba(15, 23, 42, 0.08);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(15, 23, 42, 0.06);
+}
+
+.demo-caption--long strong {
+  color: #0f172a;
+  font-weight: 650;
+}
+
+.demo-caption--long sub {
+  font-size: 0.75em;
 }
 
 /* Capabilities Section */
@@ -881,12 +918,12 @@ body {
 
   .hero-demo-container {
     transform: translateY(8px);
-    max-width: min(100%, 420px);
+    max-width: min(100%, 560px);
     margin: 0 auto;
   }
 
   .hero-img {
-    max-height: min(38vh, 360px);
+    max-height: min(58vh, 520px);
   }
 
   .nav-links {
@@ -1197,17 +1234,134 @@ body {
   display: block;
 }
 
-.viz-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: 20px;
+.viz-carousel-hint {
+  text-align: center;
+  font-size: 0.88rem;
+  color: #64748b;
+  margin: -12px 0 20px;
 }
-.viz-grid .viz-img-wrap {
-  margin-bottom: 0;
-  max-height: min(72vh, 560px);
+
+.viz-carousel-hint kbd {
+  font-family: inherit;
+  font-size: 0.85em;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  color: #475569;
 }
-.viz-grid .viz-img-wrap img {
-  max-height: min(64vh, 500px);
+
+.viz-carousel {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 1100px;
+  margin: 0 auto;
+  padding-bottom: 40px;
+}
+
+.viz-carousel-viewport {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: white;
+  border-radius: 16px;
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.07);
+  padding: 12px;
+}
+
+.viz-carousel-track {
+  display: flex;
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform;
+}
+
+.viz-carousel-slide {
+  flex: 0 0 100%;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+}
+
+.viz-carousel-slide img {
+  width: auto;
+  max-width: 100%;
+  max-height: min(78vh, 760px);
+  height: auto;
+  object-fit: contain;
+  border-radius: 10px;
+  display: block;
+}
+
+.viz-carousel-btn {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1.5px solid #e2e8f0;
+  background: white;
+  color: #4f46e5;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
+  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
+}
+
+.viz-carousel-btn:hover {
+  background: #667eea;
+  color: white;
+  border-color: #667eea;
+  box-shadow: 0 4px 16px rgba(102, 126, 234, 0.35);
+}
+
+.viz-carousel-btn:focus-visible {
+  outline: 2px solid #667eea;
+  outline-offset: 2px;
+}
+
+.viz-carousel-meta {
+  position: absolute;
+  bottom: -36px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: #64748b;
+}
+
+@media (max-width: 640px) {
+  .viz-carousel {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+    padding-bottom: 28px;
+  }
+
+  .viz-carousel-viewport {
+    order: -1;
+    flex: 1 1 100%;
+    width: 100%;
+  }
+
+  .viz-carousel-btn {
+    width: 40px;
+    height: 40px;
+  }
+
+  .viz-carousel-meta {
+    bottom: -28px;
+    width: 100%;
+    text-align: center;
+  }
 }
 
 /* ── Results ── */

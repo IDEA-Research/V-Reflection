@@ -4,7 +4,9 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators" />
-    <title>V-Reflection Project Page</title>
+    <title>V-Reflection</title>
+    <link rel="icon" type="image/png" href="./images/Logo.png" />
+    <link rel="apple-touch-icon" href="./images/Logo.png" />
 
     <link rel="stylesheet" href="./styles.css" />
 
@@ -15,6 +17,7 @@
     <meta property="og:title" content="V-Reflection" />
     <meta property="og:description" content="Think-then-look visual reflection for active interrogators." />
     <meta property="og:type" content="website" />
+    <meta property="og:image" content="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Logo.png" />
   </head>
 
   <body>
@@ -22,6 +25,7 @@
     <nav class="navbar">
       <div class="nav-container">
         <div class="nav-logo">
+          <img class="nav-logo-img" src="./images/Logo.png" width="36" height="36" alt="" decoding="async" />
           <span class="logo-text">V-Reflection</span>
         </div>
         <div class="nav-links">
@@ -62,7 +66,19 @@
                 alt="V-Reflection teaser visualization"
                 loading="lazy"
               />
-              <div class="demo-caption"><p>Latent probes autonomously localize task-critical evidence</p></div>
+              <div class="demo-caption demo-caption--long">
+                <p>
+                  <strong>Conceptual comparison</strong> between traditional MLLMs and our V-Reflection.
+                  <strong>(a)</strong> Current MLLMs&apos; reasoning remains confined to the language domain, treating visual
+                  information as a reasoning-agnostic static input rather than an active driver of the thought process,
+                  thus leading to perception-related hallucinations (e.g., &ldquo;Kevlar&rdquo;) where the model prioritizes
+                  language priors over actual visual evidence.
+                  <strong>(b)</strong> Our framework internalizes a &ldquo;think-then-look&rdquo; visual self-reflection mechanism,
+                  where evolving latent states act as dynamic probes (<strong>Q</strong><sub>dyn</sub>) to retrace global visual features.
+                  This mechanism retrieves task-specific evidence (e.g., accurately localizing the rubber glove), effectively
+                  correcting the reasoning trajectory for a precise answer.
+                </p>
+              </div>
             </div>
           </div>
         </div>
@@ -176,7 +192,6 @@
         <div class="viz-tabs">
           <button class="viz-tab active" data-viz="train" type="button">Training Attention</button>
           <button class="viz-tab" data-viz="infer" type="button">Inference Attention</button>
-          <button class="viz-tab" data-viz="sup" type="button">More Examples</button>
         </div>
 
         <!-- Training Attention -->
@@ -189,15 +204,8 @@
           </p>
           <div class="viz-img-wrap">
             <img
-              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Train_Attn.png"
-              alt="Training attention maps — Teacher vs Student"
-              loading="lazy"
-            />
-          </div>
-          <div class="viz-img-wrap">
-            <img
               src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Train_Attn_Sup1.png"
-              alt="Training attention supplementary"
+              alt="Training attention maps — Teacher vs Student (supplementary)"
               loading="lazy"
             />
           </div>
@@ -211,44 +219,27 @@
             Each latent step progressively sharpens the model's visual focus onto the
             task-critical region, driving a precise final answer without any external grounding tool.
           </p>
-          <div class="viz-img-wrap">
-            <img
-              src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn.png"
-              alt="Inference attention maps"
-              loading="lazy"
-            />
-          </div>
-        </div>
-
-        <!-- Supplementary -->
-        <div class="viz-panel" id="viz-sup">
-          <p class="viz-desc">
-            <strong>Additional qualitative examples.</strong>
-            Across diverse visual question types, the model's latent probes consistently
-            home in on the semantically relevant region required to resolve the query.
-          </p>
-          <div class="viz-grid">
-            <div class="viz-img-wrap">
-              <img
-                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup1.png"
-                alt="Supplementary inference attention 1"
-                loading="lazy"
-              />
+          <p class="viz-carousel-hint">Use the arrow buttons or keyboard <kbd aria-label="Left arrow">&larr;</kbd> <kbd aria-label="Right arrow">&rarr;</kbd> to browse.</p>
+          <div class="viz-carousel" id="viz-infer-carousel" role="region" aria-roledescription="carousel" aria-label="Inference attention examples">
+            <button type="button" class="viz-carousel-btn viz-carousel-btn--prev" aria-label="Previous slide">&lsaquo;</button>
+            <div class="viz-carousel-viewport">
+              <div class="viz-carousel-track">
+                <div class="viz-carousel-slide" role="group" aria-roledescription="slide" aria-label="1 of 4">
+                  <img src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn.png" alt="Inference attention example 1" loading="lazy" />
+                </div>
+                <div class="viz-carousel-slide" role="group" aria-roledescription="slide" aria-label="2 of 4">
+                  <img src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup1.png" alt="Inference attention example 2" loading="lazy" />
+                </div>
+                <div class="viz-carousel-slide" role="group" aria-roledescription="slide" aria-label="3 of 4">
+                  <img src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup2.png" alt="Inference attention example 3" loading="lazy" />
+                </div>
+                <div class="viz-carousel-slide" role="group" aria-roledescription="slide" aria-label="4 of 4">
+                  <img src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup3.png" alt="Inference attention example 4" loading="lazy" />
+                </div>
+              </div>
             </div>
-            <div class="viz-img-wrap">
-              <img
-                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup2.png"
-                alt="Supplementary inference attention 2"
-                loading="lazy"
-              />
-            </div>
-            <div class="viz-img-wrap">
-              <img
-                src="https://raw.githubusercontent.com/IDEA-Research/V-Reflection/main/images/Inference_Attn_Sup3.png"
-                alt="Supplementary inference attention 3"
-                loading="lazy"
-              />
-            </div>
+            <button type="button" class="viz-carousel-btn viz-carousel-btn--next" aria-label="Next slide">&rsaquo;</button>
+            <div class="viz-carousel-meta"><span class="viz-carousel-counter"><span class="viz-carousel-idx">1</span> / 4</span></div>
           </div>
         </div>
       </div>
@@ -421,6 +412,47 @@ bash scripts_release/evaluation/evaluation_7b_stage2.sh</code></pre>
           vpanels.forEach((p) => p.classList.toggle("active", p.id === "viz-" + key));
         }
         vtabs.forEach((t) => t.addEventListener("click", () => setVizTab(t)));
+
+        /* ── inference attention carousel ── */
+        (function () {
+          const root = document.getElementById("viz-infer-carousel");
+          if (!root) return;
+          const track = root.querySelector(".viz-carousel-track");
+          const prev = root.querySelector(".viz-carousel-btn--prev");
+          const next = root.querySelector(".viz-carousel-btn--next");
+          const idxEl = root.querySelector(".viz-carousel-idx");
+          const slides = root.querySelectorAll(".viz-carousel-slide");
+          const n = slides.length;
+          let idx = 0;
+
+          function render() {
+            track.style.transform = "translateX(" + -idx * 100 + "%)";
+            idxEl.textContent = String(idx + 1);
+            root.setAttribute("data-slide", String(idx));
+          }
+
+          function go(delta) {
+            idx = (idx + delta + n) % n;
+            render();
+          }
+
+          prev.addEventListener("click", () => go(-1));
+          next.addEventListener("click", () => go(1));
+
+          document.addEventListener("keydown", function (e) {
+            var panel = document.getElementById("viz-infer");
+            if (!panel || !panel.classList.contains("active")) return;
+            if (e.key === "ArrowLeft") {
+              e.preventDefault();
+              go(-1);
+            } else if (e.key === "ArrowRight") {
+              e.preventDefault();
+              go(1);
+            }
+          });
+
+          render();
+        })();
 
         document.getElementById("year").textContent = new Date().getFullYear();
       })();
