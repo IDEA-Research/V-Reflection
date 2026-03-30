@@ -1181,22 +1181,22 @@ body {
   border-radius: 16px;
   border: 1px solid rgba(15,23,42,0.07);
   box-shadow: 0 6px 28px rgba(0,0,0,0.07);
-  padding: 12px;
+  padding: 0;
   margin-bottom: 24px;
-  overflow: auto;
-  max-height: min(88vh, 880px);
+  overflow: hidden;
+  max-height: none;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .viz-img-wrap img {
-  width: auto;
+  width: 100%;
   max-width: 100%;
-  max-height: min(78vh, 760px);
+  max-height: none;
   height: auto;
   object-fit: contain;
   object-position: center;
-  border-radius: 10px;
+  border-radius: 16px;
   display: block;
 }
 
