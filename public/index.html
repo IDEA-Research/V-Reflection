@@ -5,10 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators" />
     <title>V-Reflection Project Page</title>
-    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
+    <!-- Larger sizes first: sharper when the browser downsamples; logo fills more of the canvas. -->
+    <link rel="icon" type="image/png" sizes="192x192" href="./favicon-192.png" />
+    <link rel="icon" type="image/png" sizes="128x128" href="./favicon-128.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="./favicon-96.png" />
+    <link rel="icon" type="image/png" sizes="64x64" href="./favicon-64.png" />
     <link rel="icon" type="image/png" sizes="48x48" href="./favicon-48.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="./favicon-32.png" />
     <link rel="icon" type="image/png" href="./favicon.png" />
-    <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+    <link rel="apple-touch-icon" href="./apple-touch-icon.png" sizes="180x180" />
 
     <link rel="stylesheet" href="./styles.css" />
 
@@ -127,7 +132,7 @@
                 BCM uses RoI-Align to extract local region features from bounding boxes, then
                 compresses them into grounded latent tokens Z<sub>T</sub> via cross-attention.
                 A Stochastic Decoupled Alignment strategy prevents representation collapse
-                by alternating gradient flow between Z<sub>T</sub> and hidden states H.
+                by alternating gradient flow between latent tokens Z<sub>T</sub> and hidden states H.
               </p>
               <div class="step-tags">
                 <span>Pixel-to-Latent</span><span>Box-Guided</span>
