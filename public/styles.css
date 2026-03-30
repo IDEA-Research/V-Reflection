@@ -1186,18 +1186,24 @@ body {
   overflow: hidden;
   max-height: none;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: stretch;
+  justify-content: stretch;
 }
 .viz-img-wrap img {
   width: 100%;
   max-width: 100%;
   max-height: none;
-  height: auto;
-  object-fit: contain;
+  height: min(78vh, 760px);
+  object-fit: cover;
   object-position: center;
   border-radius: 16px;
   display: block;
+}
+
+@media (max-width: 600px) {
+  .viz-img-wrap img {
+    height: min(52vh, 420px);
+  }
 }
 
 .viz-grid {
