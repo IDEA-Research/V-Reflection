@@ -111,9 +111,9 @@
           />
           <p class="fig-caption">
             <strong>Fig. 1 — V-Reflection Architecture.</strong>
-            (a) Stage 1: BCM distills regional patches into grounded latent tokens Z<sub>T</sub> via L<sub>BCM</sub>.
+            (a) Stage 1: BCM distills regional patches into grounded latent tokens Z<sub>T</sub>.
             (b) Stage 2: DAC trains hidden states H as dynamic probes that interrogate global features.
-            (c) Inference: both modules remain entirely inactive; purely end-to-end latent decoding.
+            (c) Inference: both modules remain entirely inactive; purely end-to-end autoregressive decoding.
           </p>
         </div>
 
@@ -125,8 +125,8 @@
               <h3>Box-Guided Compression (BCM)</h3>
               <p>
                 BCM uses RoI-Align to extract local region features from bounding boxes, then
-                compresses them into S grounded latent tokens Z<sub>T</sub> via cross-attention.
-                A <em>Stochastic Decoupled Alignment</em> strategy prevents representation collapse
+                compresses them into grounded latent tokens Z<sub>T</sub> via cross-attention.
+                A Stochastic Decoupled Alignment strategy prevents representation collapse
                 by alternating gradient flow between Z<sub>T</sub> and hidden states H.
               </p>
               <div class="step-tags">
@@ -143,8 +143,8 @@
               <h3>Dynamic Autoregressive Compression (DAC)</h3>
               <p>
                 DAC projects the LLM's S evolving hidden states H into dynamic queries Q<sub>dyn</sub>,
-                which interrogate the global visual feature map F<sub>global</sub>.
-                MSE + KL-divergence distillation from BCM teacher transfers spatial grounding
+                which interrogate the global visual feature map.
+                MSE + KL divergence distillation from BCM teacher transfers spatial grounding
                 expertise without requiring bounding-box priors at inference.
               </p>
               <div class="step-tags">
@@ -161,7 +161,8 @@
               <h3>End-to-End Latent Decoding</h3>
               <p>
                 Both BCM and DAC remain entirely inactive. The model decodes purely
-                autoregressively in latent space as the next-step input embedding for latent reasoning steps with optimal efficiency.
+                autoregressively in latent space as the next-step input embedding 
+                for latent reasoning steps with optimal efficiency.
               </p>
               <div class="step-tags">
                 <span>Pure Autoregressive Decoding</span><span>No Bbox Prior</span><span>Latent Reasoning</span>
