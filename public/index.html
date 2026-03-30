@@ -130,7 +130,7 @@
                 by alternating gradient flow between Z<sub>T</sub> and hidden states H.
               </p>
               <div class="step-tags">
-                <span>RoI-Align</span><span>Cross-Attention</span><span>Pixel-to-Latent</span>
+                <span>Pixel-to-Latent</span><span>Box-Guided</span>
               </div>
             </div>
           </div>
@@ -148,7 +148,7 @@
                 expertise without requiring bounding-box priors at inference.
               </p>
               <div class="step-tags">
-                <span>Dynamic Probes</span><span>KL Distillation</span><span>MSE Alignment</span>
+                <span>Dynamic Probes</span><span>KL Distillation</span>
               </div>
             </div>
           </div>
@@ -161,11 +161,10 @@
               <h3>End-to-End Latent Decoding</h3>
               <p>
                 Both BCM and DAC remain entirely inactive. The model decodes purely
-                autoregressively in latent space — using <code>last_position_hidden_state</code>
-                as the next-step input embedding for 8 latent reasoning steps with optimal efficiency.
+                autoregressively in latent space as the next-step input embedding for latent reasoning steps with optimal efficiency.
               </p>
               <div class="step-tags">
-                <span>No Extra Architecture</span><span>8 Latent Steps</span><span>Zero Overhead</span>
+                <span>Pure Autoregressive Decoding</span><span>No Bbox Prior</span><span>Latent Reasoning</span>
               </div>
             </div>
           </div>
