@@ -455,7 +455,7 @@ body {
 .hero-demo-container {
   position: relative;
   width: 100%;
-  max-width: min(100%, 600px);
+  max-width: min(100%, 760px);
   margin: 0 auto;
   transform: translateY(12px);
   z-index: 1;
@@ -490,7 +490,7 @@ body {
 .hero-img {
   width: 100%;
   max-width: 100%;
-  max-height: min(70vh, 600px);
+  max-height: min(85vh, 820px);
   height: auto;
   object-fit: contain;
   object-position: center;
@@ -889,12 +889,12 @@ body {
 
   .hero-demo-container {
     transform: translateY(8px);
-    max-width: min(100%, 420px);
+    max-width: min(100%, 560px);
     margin: 0 auto;
   }
 
   .hero-img {
-    max-height: min(38vh, 360px);
+    max-height: min(55vh, 520px);
   }
 
   .nav-links {
@@ -1033,9 +1033,9 @@ body {
   text-align: center;
 }
 .framework-figure img {
-  width: auto;
-  max-width: min(100%, 920px);
-  max-height: min(56vh, 520px);
+  width: 100%;
+  max-width: min(100%, 820px);
+  max-height: none;
   height: auto;
   object-fit: contain;
   object-position: center;
@@ -1400,9 +1400,9 @@ body {
 /* responsive: cap hero-img on small screens */
 @media (max-width: 920px) {
   .hero-demo-container {
-    max-width: min(100%, 520px);
+    max-width: min(100%, 660px);
   }
   .hero-img {
-    max-height: min(55vh, 480px);
+    max-height: min(70vh, 680px);
   }
 }
