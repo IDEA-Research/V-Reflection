@@ -414,16 +414,34 @@ bash scripts_release/evaluation/evaluation_7b_stage2.sh</code></pre>
         (function () {
           const carousel = document.getElementById("infer-carousel");
           if (!carousel) return;
+          const wrap = carousel.querySelector(".carousel-track-wrap");
           const track = carousel.querySelector(".carousel-track");
           const slides = Array.from(carousel.querySelectorAll(".carousel-slide"));
           const dots = Array.from(carousel.querySelectorAll(".carousel-dot"));
           let cur = 0;
 
+          function syncHeight() {
+            const img = slides[cur].querySelector("img");
+            if (img && img.complete && img.naturalHeight) {
+              wrap.style.height = slides[cur].offsetHeight + "px";
+            } else if (img) {
+              img.addEventListener("load", function () {
+                wrap.style.height = slides[cur].offsetHeight + "px";
+              }, { once: true });
+            }
+          }
+
           function goTo(idx) {
             cur = (idx + slides.length) % slides.length;
             track.style.transform = "translateX(-" + (cur * 100) + "%)";
             dots.forEach((d, i) => d.classList.toggle("active", i === cur));
+            setTimeout(syncHeight, 50);
           }
+
+          /* init height after all images in slide 0 load */
+          window.addEventListener("load", function () {
+            wrap.style.height = slides[0].offsetHeight + "px";
+          });
 
           carousel.querySelector(".carousel-prev").addEventListener("click", () => goTo(cur - 1));
           carousel.querySelector(".carousel-next").addEventListener("click", () => goTo(cur + 1));

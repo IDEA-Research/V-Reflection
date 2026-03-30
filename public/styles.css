@@ -1189,26 +1189,14 @@ body {
   padding: 0;
   margin-bottom: 24px;
   overflow: hidden;
-  max-height: none;
-  display: flex;
-  align-items: stretch;
-  justify-content: stretch;
+  display: block;
+  width: 100%;
 }
 .viz-img-wrap img {
   width: 100%;
-  max-width: 100%;
-  max-height: none;
-  height: min(calc(145vh * 4 / 3), calc(1680px * 4 / 3));
-  object-fit: cover;
-  object-position: center;
-  border-radius: 16px;
+  height: auto;
   display: block;
-}
-
-@media (max-width: 600px) {
-  .viz-img-wrap img {
-    height: min(calc(100vh * 4 / 3), calc(1080px * 4 / 3));
-  }
+  border-radius: 16px;
 }
 
 .viz-grid {
@@ -1331,10 +1319,12 @@ body {
   width: 100%;
   overflow: hidden;
   border-radius: 16px;
+  transition: height 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .carousel-track {
   display: flex;
+  align-items: flex-start;
   transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
