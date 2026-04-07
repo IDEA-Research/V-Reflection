@@ -186,18 +186,21 @@ Visualizations confirm that latent reasoning autonomously localizes task-critica
   <img src="./images/Inference_Attn.png" width="90%">
 </p>
 
-<!-- ## Citation
+## Citation
 
 If you find this work helpful for your research, please cite:
 
 ```bibtex
-@misc{li2025lvr,
-  title={Latent Visual Reasoning},
-  author={Bangzheng Li and Ximeng Sun and Jiang Liu and Ze Wang and Jialian Wu and Xiaodong Yu and Hao Chen and Emad Barsoum and Muhao Chen and Zicheng Liu},
-  year={2025},
-  journal={arXiv preprint arXiv:2509.24251}
+@misc{zhou2026vreflectiontransformingmllmspassive,
+      title={V-Reflection: Transforming MLLMs from Passive Observers to Active Interrogators}, 
+      author={Jiazhou Zhou and Yucheng Chen and Hongyang Li and Qing Jiang and Hu Zhou and Ying-Cong Chen and Lei Zhang},
+      year={2026},
+      eprint={2604.03307},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2604.03307}, 
 }
-``` -->
+```
 
 ## Acknowledgement
 
